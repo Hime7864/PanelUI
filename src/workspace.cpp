@@ -673,7 +673,7 @@ void WorkspaceModel::ComputeNode(int Node, rect Area)
 	{
 		const int Group = Nodes[Node].Group;
 		if (Group >= 0 && Group < static_cast<int>(Groups.size()) && Groups[Group].InUse)
-			Groups[Group].TargetBounds = Area;
+			Groups[Group].TargetBounds = UiSnap(Area);
 
 		return;
 	}
@@ -683,16 +683,16 @@ void WorkspaceModel::ComputeNode(int Node, rect Area)
 	if (Nodes[Node].Horizontal)
 	{
 		const float Split = Area.left + Area.width() * Nodes[Node].Ratio;
-		Nodes[Node].Divider = rect(Split - Gap * 0.5f, Area.top, Split + Gap * 0.5f, Area.bottom);
-		ComputeNode(Nodes[Node].First, rect(Area.left, Area.top, Split - Gap * 0.5f, Area.bottom));
-		ComputeNode(Nodes[Node].Second, rect(Split + Gap * 0.5f, Area.top, Area.right, Area.bottom));
+		Nodes[Node].Divider = UiSnap(rect(Split - Gap * 0.5f, Area.top, Split + Gap * 0.5f, Area.bottom));
+		ComputeNode(Nodes[Node].First, rect(Area.left, Area.top, Nodes[Node].Divider.left, Area.bottom));
+		ComputeNode(Nodes[Node].Second, rect(Nodes[Node].Divider.right, Area.top, Area.right, Area.bottom));
 	}
 	else
 	{
 		const float Split = Area.top + Area.height() * Nodes[Node].Ratio;
-		Nodes[Node].Divider = rect(Area.left, Split - Gap * 0.5f, Area.right, Split + Gap * 0.5f);
-		ComputeNode(Nodes[Node].First, rect(Area.left, Area.top, Area.right, Split - Gap * 0.5f));
-		ComputeNode(Nodes[Node].Second, rect(Area.left, Split + Gap * 0.5f, Area.right, Area.bottom));
+		Nodes[Node].Divider = UiSnap(rect(Area.left, Split - Gap * 0.5f, Area.right, Split + Gap * 0.5f));
+		ComputeNode(Nodes[Node].First, rect(Area.left, Area.top, Area.right, Nodes[Node].Divider.top));
+		ComputeNode(Nodes[Node].Second, rect(Area.left, Nodes[Node].Divider.bottom, Area.right, Area.bottom));
 	}
 }
 
@@ -703,12 +703,14 @@ void WorkspaceModel::BuildTabs(int GroupIndex)
 
 	const float Pad = 6.f * LayoutScale;
 	const float HeaderHeight = UiHeaderHeight * LayoutScale;
-	const float PlusWidth = 30.f * LayoutScale;
+	const float PlusSize = 26.f * LayoutScale;
 	const float GripWidth = Group.Floating ? 18.f * LayoutScale : 0.f;
-	const float TabPadding = 22.f * LayoutScale;
-	const float MinTab = 84.f * LayoutScale;
+	const float TextInset = UiTabTextInset * LayoutScale;
+	const float MinTab = 72.f * LayoutScale;
 	const float MaxTab = 210.f * LayoutScale;
-	const float CloseWidth = 18.f * LayoutScale;
+	const float CloseSize = UiTabCloseSize * LayoutScale;
+	const float CloseInset = UiTabCloseInset * LayoutScale;
+	const float TabTop = 4.f * LayoutScale;
 
 	const rect Bounds = Group.Bounds;
 	if (Bounds.width() <= 1.f || Bounds.height() <= 1.f)
@@ -722,10 +724,13 @@ void WorkspaceModel::BuildTabs(int GroupIndex)
 	const float Header = std::min(HeaderHeight, Bounds.height());
 	Group.Header = rect(Bounds.left, Bounds.top, Bounds.right, Bounds.top + Header);
 	Group.Grip = rect(Bounds.left + Pad, Group.Header.top, Bounds.left + Pad + GripWidth, Group.Header.bottom);
-	Group.NewTab = rect(Bounds.right - Pad - PlusWidth, Group.Header.top + 5.f * LayoutScale, Bounds.right - Pad, Group.Header.bottom - 5.f * LayoutScale);
+
+	// The new-tab button is a square centred on the tab row (tabs start TabTop below the header top).
+	const float TabCenterY = std::round((Group.Header.top + TabTop + Group.Header.bottom) * 0.5f);
+	Group.NewTab = UiSnap(rect(Bounds.right - Pad - PlusSize, TabCenterY - PlusSize * 0.5f, Bounds.right - Pad, TabCenterY + PlusSize * 0.5f));
 
 	const float ContentLeft = Bounds.left + Pad + GripWidth;
-	const float ContentRight = Bounds.right - Pad - PlusWidth - 4.f * LayoutScale;
+	const float ContentRight = Bounds.right - Pad - PlusSize - 4.f * LayoutScale;
 	const float Available = std::max(0.f, ContentRight - ContentLeft);
 
 	const size_t Count = Group.Panels.size();
@@ -736,7 +741,8 @@ void WorkspaceModel::BuildTabs(int GroupIndex)
 	{
 		const std::wstring& Title = Panels[Group.Panels[Index]].Title;
 		const float TextWidth = renderer::measure_text(Title.c_str(), UiTabTextSize * LayoutScale).width();
-		const float Width = std::clamp(TextWidth + TabPadding * 2.f + CloseWidth, MinTab, MaxTab);
+		// Title, then a gap the size of the close inset, then the close button and its inset.
+		const float Width = std::clamp(std::ceil(TextInset + TextWidth + CloseInset * 2.f + CloseSize), MinTab, MaxTab);
 		Widths[Index] = Width;
 		Total += Width;
 	}
@@ -774,16 +780,15 @@ void WorkspaceModel::BuildTabs(int GroupIndex)
 
 		TabRect Tab;
 		Tab.Panel = Group.Panels[Index];
-		Tab.Bounds = rect(X, Group.Header.top + 4.f * LayoutScale, X + Width, Group.Header.bottom);
+		Tab.Bounds = UiSnap(rect(X, Group.Header.top + TabTop, X + Width, Group.Header.bottom));
 
 		const float CenterY = (Tab.Bounds.top + Tab.Bounds.bottom) * 0.5f;
-		const float CloseSize = 18.f * LayoutScale;
 
 		// A close button on a tab narrower than this would cover the whole tab and turn every click into a close.
 		if (Width >= 44.f * LayoutScale)
 		{
-			Tab.Close = rect(Tab.Bounds.right - CloseSize - 2.f * LayoutScale, CenterY - CloseSize * 0.5f,
-				Tab.Bounds.right - 2.f * LayoutScale, CenterY + CloseSize * 0.5f);
+			Tab.Close = UiSnap(rect(Tab.Bounds.right - CloseSize - CloseInset, CenterY - CloseSize * 0.5f,
+				Tab.Bounds.right - CloseInset, CenterY + CloseSize * 0.5f));
 		}
 
 		Group.Tabs.push_back(Tab);

@@ -5,7 +5,7 @@ library** that already contains PowerlayGraphics.
 
 ```
 include/panelui.h   umbrella header (only include a consumer needs)
-include/*.h         theme, framework (widgets), workspace (dock model), ui (shell)
+include/*.h         theme, icons, framework (widgets), workspace (dock model), ui (shell)
 src/*.cpp           implementation, compiled into PanelUI.lib
 third_party/PowerlayGraphics/lib/<Config>/PowerlayGraphics.lib   vendored renderer archive
 ```
@@ -191,6 +191,56 @@ UiShell (ui.h/ui.cpp)            window chrome, dock model owner, tabs, drag/doc
    with `ScrollMax == 0`; list rows are culled by row rect in `DrawTextNode`.
 9. **Ids**: `UiNode::Id` is only for `AnchorTo` lookups (`PanelContent::Find`). `RadioGroup` ids are
    negative for generated groups.
+10. **Small outlined shapes are two fills, never fill + stroke.** A stroked `draw_circle` straddles the
+    fill's edge and leaves a faint halo or double rim on small shapes. Draw outlined rings as two
+    `draw_filled_circle` calls (outer ink, inner surface) and outlined rounded rects (checkbox, toggle
+    track, swatches) with `UiFramedRoundedRect` (theme.h). Outline tone for unchecked indicators is
+    `ControlEdge(Theme)`; `Theme.Border` alone vanishes against the workspace fill.
+    `PanelUI.Tests` checks the radio (`indicator_rings_are_solid`).
+11. **Geometry lands on whole pixels.** `LayoutNode` snaps every node's bounds (`UiSnap`), dock leaves
+    and dividers are snapped in `ComputeNode`, and tabs in `BuildTabs`; text is fractional-height, so
+    without this every widget under a text line put its 1 px border across two half-lit rows (the
+    "ghost line" look). Inside a widget, derive edges from snapped bounds with `std::round`, never
+    `Center.y ± Size/2` raw. Axis-aligned hairlines (minus, plus, caption glyphs, divider handles) need
+    whole-pixel widths: odd widths centred on a pixel centre, even ones on a pixel edge. Test:
+    `widget_outlines_land_on_whole_pixels`.
+12. **Chrome glyphs are sized explicitly.** `DrawCloseGlyph` / `DrawPlusGlyph` take a glyph size
+    centred in the (larger) hit rect, so a hit target can grow without the glyph growing with it. Tab
+    metrics shared by layout and painter live in theme.h (`UiTabTextInset`, `UiTabCloseSize`,
+    `UiTabCloseInset`).
+13. **The shell requests 8x MSAA** (`UiShell::Initialize`). At 4x a 2-3 px radius (track caps,
+    scrollbar ends, grip dots) rasterises as a notch or nub. Keep thin pills at least 6 px wide.
+
+## Icons and images
+
+**Icons** (`include/icons.h`) are drawn from vector primitives, not glyphs or textures, so they stay
+sharp at any size and DPI and take the theme tint directly:
+
+```cpp
+DrawUiIcon(UiIcon::Search, rect(16.f, 16.f, 32.f, 32.f), Theme.Text);
+
+Content.Icon(Root, UiIcon::Folder, 18.f);                     // icon widget
+Content.Button(Root, UiIcon::Play, L"Run", [] { });           // icon + label button
+```
+
+The set covers window chrome (`WindowMaximize`, `WindowRestore`, `Minus`, `Close`), navigation
+(chevrons, `Menu`, `Grid`, `List`), files (`Folder`, `File`, `Image`), media (`Play`, `Pause`, `Stop`,
+`Refresh`) and status (`Info`, `Warning`, `Error`, `Check`, `Lock`, `Star`, `Search`, `Settings`,
+`Trash`, `Plus`, `Minus`). `UiIconName()` returns the stable name. The shell's window controls, tab
+close and new-tab glyphs all go through the set, so a restyle is one place.
+
+**Images** (`PanelContent::Image`) take a `texture_id` plus a fit mode:
+
+| mode | placement |
+|---|---|
+| `UiImageFit::Contain` | whole image inside the box, aspect kept, letterboxed (default) |
+| `UiImageFit::Cover` | fills the box, aspect kept, clipped to the box |
+| `UiImageFit::Stretch` | fills the box, aspect ignored |
+
+`PanelContent::ImageFile(Parent, path, w, h, fit)` loads PNG/JPG/BMP through WIC and caches one texture
+per path in the named-texture registry, so per-frame calls do not touch disk. Set
+`Node(id).Style.TextColor = UiPaint::Solid(tint)` to tint an image; missing or undecodable files fall
+back to the placeholder box. Textures survive device loss (the renderer retains their pixels).
 
 ## Adding a widget (checklist)
 

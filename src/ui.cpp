@@ -222,6 +222,11 @@ void UiShell::Initialize(HWND InWindow)
 {
 	Window = InWindow;
 
+	// The shell is full of small curved shapes (radio rings, 4 px track caps, knobs, scrollbar ends,
+	// grip dots). At 4x each edge pixel has only five coverage levels, which turns a 2 px radius into a
+	// notch or a nub; 8x gives nine and reads round. Falls back to the highest supported count.
+	renderer::set_multisampling(8);
+
 	const std::vector<UiTheme>& Themes = UiThemes();
 	if (!Themes.empty())
 	{
@@ -775,23 +780,24 @@ void UiShell::UpdateMetrics()
 	WindowMax = rect(ClientSize.x - ControlWidth * 2.f, 0.f, ClientSize.x - ControlWidth, BarHeight);
 	WindowMin = rect(ClientSize.x - ControlWidth * 3.f, 0.f, ClientSize.x - ControlWidth * 2.f, BarHeight);
 
+	// Button edges are snapped so their 1 px outlines land on one pixel row instead of two half-lit ones.
 	const float NewRight = WindowMin.left - 10.f * Scale;
-	const float NewTextWidth = renderer::measure_text(L"New Panel", 13.f * Scale).width();
-	const float NewWidth = NewTextWidth + 54.f * Scale;
-	NewPanelButton = rect(NewRight - NewWidth, (BarHeight - ButtonSize) * 0.5f,
-		NewRight, (BarHeight + ButtonSize) * 0.5f);
+	const float NewTextWidth = renderer::measure_text(L"New Panel", UiBodyTextSize * Scale).width();
+	const float NewWidth = NewTextWidth + 44.f * Scale;
+	NewPanelButton = UiSnap(rect(NewRight - NewWidth, (BarHeight - ButtonSize) * 0.5f,
+		NewRight, (BarHeight + ButtonSize) * 0.5f));
 
-	const float DebugWidth = renderer::measure_text(L"Rects", UiBodyTextSize * Scale).width() + 30.f * Scale;
-	DebugButton = rect(NewPanelButton.left - 10.f * Scale - DebugWidth, (BarHeight - ButtonSize) * 0.5f,
-		NewPanelButton.left - 10.f * Scale, (BarHeight + ButtonSize) * 0.5f);
+	const float DebugWidth = renderer::measure_text(L"Rects", UiBodyTextSize * Scale).width() + 28.f * Scale;
+	DebugButton = UiSnap(rect(NewPanelButton.left - 8.f * Scale - DebugWidth, (BarHeight - ButtonSize) * 0.5f,
+		NewPanelButton.left - 8.f * Scale, (BarHeight + ButtonSize) * 0.5f));
 
 	const float CardWidth = 700.f * Scale;
 	const float CardHeight = 430.f * Scale;
-	const float CardLeft = (ClientSize.x - CardWidth) * 0.5f;
-	const float CardTop = (ClientSize.y - CardHeight) * 0.5f;
+	const float CardLeft = std::round((ClientSize.x - CardWidth) * 0.5f);
+	const float CardTop = std::round((ClientSize.y - CardHeight) * 0.5f);
 	SettingsCard = rect(CardLeft, CardTop, CardLeft + CardWidth, CardTop + CardHeight);
-	SettingsClose = rect(CardLeft + CardWidth - 40.f * Scale, CardTop + 12.f * Scale,
-		CardLeft + CardWidth - 16.f * Scale, CardTop + 36.f * Scale);
+	SettingsClose = UiSnap(rect(CardLeft + CardWidth - 44.f * Scale, CardTop + 12.f * Scale,
+		CardLeft + CardWidth - 16.f * Scale, CardTop + 40.f * Scale));
 
 	ThemeRows.clear();
 	const float RowLeft = CardLeft + 20.f * Scale;
@@ -926,7 +932,7 @@ void UiShell::DrawAppBar()
 	if (SettingsHover || SettingsOpen)
 		renderer::draw_filled_rounded_rect(SettingsButton, 8.f * Scale, Theme.TabHover);
 
-	DrawGear(SettingsButton.center(), 7.f * Scale, SettingsHover || SettingsOpen ? Theme.Text : Theme.Muted);
+	DrawGear(SettingsButton.center(), 8.f * Scale, SettingsHover || SettingsOpen ? Theme.Text : Theme.Muted);
 
 	const float TitleSize = UiTitleTextSize * Scale;
 	const float TitleTop = AppBarRect.center().y - renderer::line_height(TitleSize) * 0.5f;
@@ -936,8 +942,8 @@ void UiShell::DrawAppBar()
 		renderer::draw_text(TitlePoint, TitleSize, text_align::left, Title.c_str(), Theme.Text);
 
 	const bool DebugHover = BarHover && PointInRect(DebugButton, Mouse);
-	renderer::draw_filled_rounded_rect(DebugButton, 8.f * Scale, DebugHover ? Theme.TabHover : Theme.Header);
-	renderer::draw_rounded_rect(DebugButton, 8.f * Scale, 1.f, DebugRects ? Theme.Accent : Theme.Border);
+	renderer::draw_filled_rounded_rect(DebugButton, 6.f * Scale, DebugHover ? Theme.TabHover : Theme.Header);
+	renderer::draw_rounded_rect(DebugButton, 6.f * Scale, 1.f, DebugRects ? Theme.Accent : Theme.Border);
 
 	const float DebugTextSize = UiBodyTextSize * Scale;
 	const float DebugTextTop = DebugButton.center().y - renderer::line_height(DebugTextSize) * 0.5f;
@@ -948,19 +954,19 @@ void UiShell::DrawAppBar()
 			DebugRects ? Theme.Accent : (DebugHover ? Theme.Text : Theme.Muted));
 
 	const bool NewHover = BarHover && PointInRect(NewPanelButton, Mouse);
-	renderer::draw_filled_rounded_rect(NewPanelButton, 8.f * Scale, NewHover ? Theme.TabHover : Theme.Header);
-	renderer::draw_rounded_rect(NewPanelButton, 8.f * Scale, 1.f, Theme.Border);
+	renderer::draw_filled_rounded_rect(NewPanelButton, 6.f * Scale, NewHover ? Theme.TabHover : Theme.Header);
+	renderer::draw_rounded_rect(NewPanelButton, 6.f * Scale, 1.f, Theme.Border);
 
-	const float PlusSize = 8.f * Scale;
-	const vec2 PlusCenter(NewPanelButton.left + 18.f * Scale, NewPanelButton.center().y);
-	DrawPlusGlyph(rect(PlusCenter.x - PlusSize, PlusCenter.y - PlusSize, PlusCenter.x + PlusSize, PlusCenter.y + PlusSize), Theme.Accent);
+	const float PlusBox = 16.f * Scale;
+	const rect PlusRect(NewPanelButton.left + 8.f * Scale, NewPanelButton.top, NewPanelButton.left + 8.f * Scale + PlusBox, NewPanelButton.bottom);
+	DrawPlusGlyph(PlusRect, 14.f * Scale, Theme.Accent);
 
 	const float TextSize = UiBodyTextSize * Scale;
 	const float TextTop = NewPanelButton.center().y - renderer::line_height(TextSize) * 0.5f;
-	const vec2 NewPoint(NewPanelButton.left + 32.f * Scale, TextTop);
+	const vec2 NewPoint(PlusRect.right + 6.f * Scale, TextTop);
 
 	if (!OccludedByOverlay(renderer::text_bounds(NewPoint, TextSize, text_align::left, L"New Panel")))
-		renderer::draw_text(NewPoint, TextSize, text_align::left, L"New Panel", NewHover ? Theme.Text : Theme.Muted);
+		renderer::draw_text(NewPoint, TextSize, text_align::left, L"New Panel", Theme.Text);
 
 	const bool Maximized = IsZoomed(Window) != 0;
 	const rect Controls[3] = { WindowMin, WindowMax, WindowClose };
@@ -975,29 +981,38 @@ void UiShell::DrawAppBar()
 			renderer::draw_filled_rect(Controls[Index], CloseButton ? Theme.Danger : Theme.TabHover);
 
 		const color Tint = Hovered ? (CloseButton ? White : Theme.Text) : Theme.Muted;
+
+		// Windows caption metrics: a 10 px glyph drawn with whole-pixel hairlines on the pixel grid, so
+		// the minimize bar and maximize box are one crisp pixel wide instead of two half-lit rows.
+		const float Hair = std::max(1.f, std::round(Scale));
+		const float Size = std::round(10.f * Scale);
 		const vec2 Center = Controls[Index].center();
-		const float Extent = 5.f * Scale;
+		const float Left = std::floor(Center.x - Size * 0.5f);
+		const float Top = std::floor(Center.y - Size * 0.5f);
+		const rect Box(Left, Top, Left + Size, Top + Size);
 
 		if (Index == 0)
 		{
-			renderer::draw_filled_rect(rect(Center.x - Extent, Center.y - 0.5f * Scale, Center.x + Extent, Center.y + 0.5f * Scale), Tint);
+			const float Y = std::floor(Center.y);
+			renderer::draw_filled_rect(rect(Box.left, Y, Box.right, Y + Hair), Tint);
+		}
+		else if (Index == 1 && !Maximized)
+		{
+			renderer::draw_rect(Box, Hair, Tint);
 		}
 		else if (Index == 1)
 		{
-			if (Maximized)
-			{
-				renderer::draw_rect(rect(Center.x - Extent, Center.y - Extent + 2.f * Scale, Center.x + Extent - 2.f * Scale, Center.y + Extent), Scale, Tint);
-				renderer::draw_rect(rect(Center.x - Extent + 2.f * Scale, Center.y - Extent, Center.x + Extent, Center.y + Extent - 2.f * Scale), Scale, Tint);
-			}
-			else
-			{
-				renderer::draw_rect(rect(Center.x - Extent, Center.y - Extent, Center.x + Extent, Center.y + Extent), Scale, Tint);
-			}
+			// Restore: a front square at the bottom-left, and the top and right edges of the one behind it.
+			const float Shift = std::round(2.f * Scale);
+			renderer::draw_rect(rect(Box.left, Box.top + Shift, Box.right - Shift, Box.bottom), Hair, Tint);
+			renderer::draw_filled_rect(rect(Box.left + Shift, Box.top, Box.right, Box.top + Hair), Tint);
+			renderer::draw_filled_rect(rect(Box.right - Hair, Box.top, Box.right, Box.bottom - Shift), Tint);
 		}
 		else
 		{
-			renderer::draw_rounded_line(vec2(Center.x - Extent, Center.y - Extent), vec2(Center.x + Extent, Center.y + Extent), 1.4f * Scale, Tint);
-			renderer::draw_rounded_line(vec2(Center.x + Extent, Center.y - Extent), vec2(Center.x - Extent, Center.y + Extent), 1.4f * Scale, Tint);
+			const float Stroke = 1.2f * Scale;
+			renderer::draw_line(vec2(Box.left, Box.top), vec2(Box.right, Box.bottom), Stroke, Tint);
+			renderer::draw_line(vec2(Box.right, Box.top), vec2(Box.left, Box.bottom), Stroke, Tint);
 		}
 	}
 }
@@ -1169,7 +1184,7 @@ void UiShell::DrawGroupText(int Group)
 			else
 			{
 				const float Top = Tab.Bounds.center().y - renderer::line_height(Size) * 0.5f;
-				renderer::draw_text(vec2(Tab.Bounds.left + 10.f * Scale, Top), Size, text_align::left,
+				renderer::draw_text(vec2(Tab.Bounds.left + UiTabTextInset * Scale, Top), Size, text_align::left,
 					Workspace.Panels[Tab.Panel].Title.c_str(), Active ? Theme.Text : Theme.Muted);
 			}
 
@@ -1198,12 +1213,17 @@ void UiShell::DrawGroup(int GroupIndex)
 	if (GroupIndex < static_cast<int>(GroupOpaque.size()) && GroupOpaque[GroupIndex])
 		Fill.a = 1.f;
 
+	// Floating panels sit above the dock, so they get elevation; a translucent (glass) fill would show
+	// the shadow through itself, so only opaque floating panels cast one.
+	if (Item.Floating && Fill.a > 0.98f)
+		renderer::draw_shadow(Bounds, 18.f * Scale, Theme.Shadow);
+
 	renderer::draw_filled_rounded_rect(Bounds, Radius, Fill);
 	DrawTabStrip(GroupIndex);
 	DrawGroupContent(GroupIndex, Theme);
 
 	if (Item.Floating)
-		renderer::draw_rounded_rect(Bounds, Radius, 1.f, Theme.Border);
+		renderer::draw_rounded_rect(Bounds, Radius, 1.f, UiMix(Theme.Border, Theme.Muted, 0.25f));
 
 	if (GroupIndex == ActiveGroup)
 	{
@@ -1243,6 +1263,11 @@ void UiShell::DrawTabStrip(int GroupIndex)
 		{
 			renderer::draw_filled_rounded_rect(Tab.Bounds, 4.f * Scale, Theme.TabActive);
 			renderer::draw_filled_rect(rect(Tab.Bounds.left, Tab.Bounds.center().y, Tab.Bounds.right, Tab.Bounds.bottom), Theme.TabActive);
+
+			// Selection indicator over the header rule: accent in the focused group, neutral elsewhere.
+			const float Indicator = std::max(1.f, std::round(2.f * Scale));
+			const color IndicatorTint = GroupIndex == ActiveGroup ? Theme.Accent : UiMix(Theme.Border, Theme.Muted, 0.45f);
+			renderer::draw_filled_rect(rect(Tab.Bounds.left, Tab.Bounds.bottom - Indicator, Tab.Bounds.right, Tab.Bounds.bottom), IndicatorTint);
 		}
 		else if (Hovered)
 		{
@@ -1258,24 +1283,24 @@ void UiShell::DrawTabStrip(int GroupIndex)
 		const bool HasClose = Tab.Close.width() > 0.f;
 		const bool CloseHover = HasClose && HoverHere && PointInRect(Tab.Close, Mouse);
 		const bool ShowClose = Active || Hovered || CloseHover;
+		const float CloseGlyph = 12.f * Scale;
 
 		if (CloseHover)
 		{
-			const float CircleRadius = std::min(Tab.Close.width(), Tab.Close.height()) * 0.5f;
-			renderer::draw_filled_circle(Tab.Close.center(), CircleRadius, Theme.Danger);
-			DrawCloseGlyph(Tab.Close, color(1.f, 1.f, 1.f, 1.f));
+			renderer::draw_filled_rounded_rect(Tab.Close, 4.f * Scale, WithAlpha(Theme.Text, 0.12f));
+			DrawCloseGlyph(Tab.Close, CloseGlyph, Theme.Text);
 		}
 		else if (ShowClose && HasClose)
 		{
-			DrawCloseGlyph(Tab.Close, Active ? Theme.Muted : WithAlpha(Theme.Muted, 0.75f));
+			DrawCloseGlyph(Tab.Close, CloseGlyph, Active ? Theme.Muted : WithAlpha(Theme.Muted, 0.75f));
 		}
 	}
 
 	const bool NewHover = HoverHere && PointInRect(Item.NewTab, Mouse);
 	if (NewHover)
-		renderer::draw_filled_rounded_rect(Item.NewTab, 6.f * Scale, Theme.TabHover);
+		renderer::draw_filled_rounded_rect(Item.NewTab, 5.f * Scale, Theme.TabHover);
 
-	DrawPlusGlyph(Item.NewTab, NewHover ? Theme.Text : Theme.Muted);
+	DrawPlusGlyph(Item.NewTab, 15.f * Scale, NewHover ? Theme.Text : Theme.Muted);
 }
 
 void UiShell::DrawTabDropMarker(int Group)
@@ -1296,8 +1321,10 @@ void UiShell::DrawTabDropMarker(int Group)
 	else
 		X = (Item.Tabs[Drag.TabIndex - 1].Bounds.right + Item.Tabs[Drag.TabIndex].Bounds.left) * 0.5f;
 
+	// Even width on whole pixels: a 3 px bar around a pixel edge rendered as a soft 4 px smear.
 	const rect TabBounds = Item.Tabs.front().Bounds;
-	const float Half = 1.5f * Scale;
+	const float Half = std::max(1.f, std::round(Scale));
+	X = std::round(X);
 	renderer::draw_filled_rounded_rect(rect(X - Half, TabBounds.top, X + Half, TabBounds.bottom), Half, CurrentTheme().Accent);
 }
 
@@ -1309,10 +1336,10 @@ void UiShell::DrawRenameField(const TabRect& Tab, const UiTheme& Theme)
 	const float Size = UiTabTextSize * Scale;
 	const float Top = Tab.Bounds.center().y - renderer::line_height(Size) * 0.5f;
 
-	renderer::draw_text(vec2(Tab.Bounds.left + 10.f * Scale, Top), Size, text_align::left, RenameText.c_str(), Theme.Text);
+	renderer::draw_text(vec2(Tab.Bounds.left + UiTabTextInset * Scale, Top), Size, text_align::left, RenameText.c_str(), Theme.Text);
 
 	const float TextWidth = renderer::measure_text(RenameText.c_str(), Size).width();
-	const float CaretX = Tab.Bounds.left + 10.f * Scale + TextWidth + Scale;
+	const float CaretX = Tab.Bounds.left + UiTabTextInset * Scale + TextWidth + Scale;
 
 	if (CaretVisible)
 	{
@@ -1352,7 +1379,9 @@ void UiShell::ApplyGlass()
 	Theme.Header.a = std::clamp(Theme.Header.a * Surface * 0.82f, 0.f, 1.f);
 	Theme.TabActive.a = std::clamp(Theme.TabActive.a * std::min(1.f, Surface + 0.12f), 0.f, 1.f);
 	Theme.TabHover.a = std::clamp(Theme.TabHover.a * Surface * 0.80f, 0.f, 1.f);
-	Theme.Border.a = std::clamp(Theme.Border.a * std::max(0.40f, Surface * 0.90f), 0.f, 1.f);
+	// Borders and separators carry the layout structure; fading them with the surface left 1 px rules at
+	// half strength over a translucent panel, where they all but disappear.
+	Theme.Border.a = std::clamp(Theme.Border.a * std::max(0.85f, Surface), 0.f, 1.f);
 	Theme.Menu.a = std::clamp(Theme.Menu.a * std::min(1.f, Surface + 0.30f), 0.f, 1.f);
 
 	ApplyBackdrop();
@@ -1504,7 +1533,9 @@ void UiShell::DrawColorPicker()
 
 	const rect Close = PickerCloseRect();
 	const bool CloseHover = MouseInside && PointInRect(Close, Mouse);
-	DrawCloseGlyph(Close, CloseHover ? Theme.Text : Theme.Muted);
+	if (CloseHover)
+		renderer::draw_filled_rounded_rect(Close, 5.f * Scale, Theme.TabHover);
+	DrawCloseGlyph(Close, 14.f * Scale, CloseHover ? Theme.Text : Theme.Muted);
 }
 
 void UiShell::DrawDividers()
@@ -1521,18 +1552,15 @@ void UiShell::DrawDividers()
 			(Drag.Kind == 3 && Drag.Divider == static_cast<int>(Index));
 
 		const color Tint = Hovered ? Theme.Accent : Theme.Border;
-		const vec2 Center = Node.Divider.center();
+		const vec2 Center(std::round(Node.Divider.center().x), std::round(Node.Divider.center().y));
+		const float Half = std::max(1.f, std::round(Scale));
+		const float Length = std::round(18.f * Scale);
 
+		// Grab handle: an even-width bar on whole pixels, so both long edges are crisp.
 		if (Node.Horizontal)
-		{
-			renderer::draw_filled_rounded_rect(rect(Center.x - 1.5f * Scale, Center.y - 18.f * Scale,
-				Center.x + 1.5f * Scale, Center.y + 18.f * Scale), 1.5f * Scale, Tint);
-		}
+			renderer::draw_filled_rounded_rect(rect(Center.x - Half, Center.y - Length, Center.x + Half, Center.y + Length), Half, Tint);
 		else
-		{
-			renderer::draw_filled_rounded_rect(rect(Center.x - 18.f * Scale, Center.y - 1.5f * Scale,
-				Center.x + 18.f * Scale, Center.y + 1.5f * Scale), 1.5f * Scale, Tint);
-		}
+			renderer::draw_filled_rounded_rect(rect(Center.x - Length, Center.y - Half, Center.x + Length, Center.y + Half), Half, Tint);
 	}
 }
 
@@ -2128,12 +2156,14 @@ void UiShell::DrawSettings()
 	renderer::draw_text(vec2(SettingsCard.left + 20.f * Scale, TitleTop), TitleSize, text_align::left, L"Settings", Theme.Text);
 
 	const bool CloseHover = MouseInside && PointInRect(SettingsClose, Mouse);
-	DrawCloseGlyph(SettingsClose, CloseHover ? Theme.Text : Theme.Muted);
+	if (CloseHover)
+		renderer::draw_filled_rounded_rect(SettingsClose, 6.f * Scale, Theme.TabHover);
+	DrawCloseGlyph(SettingsClose, 16.f * Scale, CloseHover ? Theme.Text : Theme.Muted);
 
 	const float DividerTop = SettingsCard.top + 58.f * Scale;
 	renderer::draw_filled_rect(rect(SettingsCard.left + 1.f * Scale, DividerTop, SettingsCard.right - 1.f * Scale, DividerTop + Scale), Theme.Border);
 
-	const float LabelSize = 10.5f * Scale;
+	const float LabelSize = 11.f * Scale;
 	const float Left = SettingsCard.left + 20.f * Scale;
 
 	renderer::draw_text(vec2(Left, SettingsCard.top + 74.f * Scale), LabelSize, text_align::left, L"THEME", Theme.Muted);
@@ -2161,20 +2191,24 @@ void UiShell::DrawSettings()
 			renderer::draw_text(vec2(Row.left + 10.f * Scale, RowTop), RowSize, text_align::left, Themes[Index].Name,
 				Selected || Hovered ? Theme.Text : Theme.Muted);
 
-		const vec2 Dot(Row.right - 13.f * Scale, Row.center().y);
+		// A plain dot: the old stroked circle sat half outside the fill and left a dark halo at 4 px radius.
+		const vec2 Dot(std::round(Row.right - 13.f * Scale), std::round(Row.center().y));
 		renderer::draw_filled_circle(Dot, 4.f * Scale, Themes[Index].Accent);
-		renderer::draw_circle(Dot, 4.f * Scale, 1.f * Scale, Theme.Border);
 	}
 
 	renderer::draw_text(vec2(Left, GlassToggle.top - 16.f * Scale), LabelSize, text_align::left, L"GLASS", Theme.Muted);
 
-	const float ToggleTop = GlassToggle.center().y - 10.f * Scale;
+	const float ToggleTop = std::round(GlassToggle.center().y - 10.f * Scale);
 	const rect ToggleTrack(GlassToggle.left, ToggleTop, GlassToggle.left + 40.f * Scale, ToggleTop + 20.f * Scale);
-	renderer::draw_filled_rounded_rect(ToggleTrack, 10.f * Scale, GlassMode ? Theme.Accent : Theme.Header);
-	renderer::draw_rounded_rect(ToggleTrack, 10.f * Scale, 1.f * Scale, GlassMode ? Theme.Accent : Theme.Border);
+	const float Hair = std::max(1.f, std::round(Scale));
+
+	if (GlassMode)
+		renderer::draw_filled_rounded_rect(ToggleTrack, 10.f * Scale, Theme.Accent);
+	else
+		UiFramedRoundedRect(ToggleTrack, 10.f * Scale, Hair, UiMix(Theme.Border, Theme.Muted, 0.35f), Opaque(Theme.Panel));
 
 	const float KnobX = GlassMode ? ToggleTrack.right - 10.f * Scale : ToggleTrack.left + 10.f * Scale;
-	renderer::draw_filled_circle(vec2(KnobX, ToggleTrack.center().y), 7.f * Scale, GlassMode ? color(1.f, 1.f, 1.f, 1.f) : Theme.Muted);
+	renderer::draw_filled_circle(vec2(KnobX, ToggleTrack.center().y), 6.f * Scale, GlassMode ? color(1.f, 1.f, 1.f, 1.f) : Theme.Muted);
 
 	const float GlassTextSize = UiBodyTextSize * Scale;
 	const float GlassTextTop = ToggleTrack.center().y - renderer::line_height(GlassTextSize) * 0.5f;
@@ -2184,39 +2218,28 @@ void UiShell::DrawSettings()
 	renderer::draw_text(vec2(Left, TintTop), LabelSize, text_align::left, L"TINT", Theme.Muted);
 	renderer::draw_text_f(vec2(GlassSlider.right, TintTop), LabelSize, text_align::right, Theme.Muted, L"%.0f%%", GlassTint * 100.f);
 
-	const float Fraction = std::clamp((GlassTint - 0.12f) / 0.83f, 0.f, 1.f);
-	const float TrackY = GlassSlider.center().y;
-	const rect Track(GlassSlider.left, TrackY - 2.f * Scale, GlassSlider.right, TrackY + 2.f * Scale);
-	renderer::draw_filled_rounded_rect(Track, 2.f * Scale, GlassMode ? Theme.Border : WithAlpha(Theme.Border, 0.5f));
-
-	if (GlassMode)
+	// Same construction as PanelContent sliders: whole-pixel track, knob as a framed disc (two fills).
+	const auto DrawSettingSlider = [&](rect Slider, float Value)
 	{
-		const rect Fill(GlassSlider.left, TrackY - 2.f * Scale, GlassSlider.left + GlassSlider.width() * Fraction, TrackY + 2.f * Scale);
-		renderer::draw_filled_rounded_rect(Fill, 2.f * Scale, Theme.Accent);
-	}
+		const float Y = std::round(Slider.center().y);
+		const float X = Slider.left + Slider.width() * Value;
+		const rect Track(Slider.left, Y - 2.f * Scale, Slider.right, Y + 2.f * Scale);
+		renderer::draw_filled_rounded_rect(Track, 2.f * Scale, UiMix(Theme.Border, Theme.Muted, GlassMode ? 0.12f : 0.f));
 
-	renderer::draw_filled_circle(vec2(GlassSlider.left + GlassSlider.width() * Fraction, TrackY), 5.f * Scale,
-		GlassMode ? Theme.Accent : Theme.Muted);
-	renderer::draw_circle(vec2(GlassSlider.left + GlassSlider.width() * Fraction, TrackY), 5.f * Scale, 1.f * Scale, Theme.Border);
+		if (GlassMode)
+			renderer::draw_filled_rounded_rect(rect(Track.left, Track.top, X, Track.bottom), 2.f * Scale, Theme.Accent);
+
+		renderer::draw_filled_circle(vec2(X, Y), 6.f * Scale, Opaque(Theme.Panel));
+		renderer::draw_filled_circle(vec2(X, Y), 4.5f * Scale, GlassMode ? Theme.Accent : Theme.Muted);
+	};
+
+	DrawSettingSlider(GlassSlider, std::clamp((GlassTint - 0.12f) / 0.83f, 0.f, 1.f));
 
 	const float SurfaceTop = SurfaceSlider.top - 14.f * Scale;
 	renderer::draw_text(vec2(Left, SurfaceTop), LabelSize, text_align::left, L"SURFACE", Theme.Muted);
 	renderer::draw_text_f(vec2(SurfaceSlider.right, SurfaceTop), LabelSize, text_align::right, Theme.Muted, L"%.0f%%", SurfaceOpacity * 100.f);
 
-	const float SurfaceFraction = std::clamp((SurfaceOpacity - 0.20f) / 0.75f, 0.f, 1.f);
-	const float SurfaceY = SurfaceSlider.center().y;
-	const rect SurfaceTrack(SurfaceSlider.left, SurfaceY - 2.f * Scale, SurfaceSlider.right, SurfaceY + 2.f * Scale);
-	renderer::draw_filled_rounded_rect(SurfaceTrack, 2.f * Scale, GlassMode ? Theme.Border : WithAlpha(Theme.Border, 0.5f));
-
-	if (GlassMode)
-	{
-		const rect SurfaceFill(SurfaceSlider.left, SurfaceY - 2.f * Scale, SurfaceSlider.left + SurfaceSlider.width() * SurfaceFraction, SurfaceY + 2.f * Scale);
-		renderer::draw_filled_rounded_rect(SurfaceFill, 2.f * Scale, Theme.Accent);
-	}
-
-	renderer::draw_filled_circle(vec2(SurfaceSlider.left + SurfaceSlider.width() * SurfaceFraction, SurfaceY), 5.f * Scale,
-		GlassMode ? Theme.Accent : Theme.Muted);
-	renderer::draw_circle(vec2(SurfaceSlider.left + SurfaceSlider.width() * SurfaceFraction, SurfaceY), 5.f * Scale, 1.f * Scale, Theme.Border);
+	DrawSettingSlider(SurfaceSlider, std::clamp((SurfaceOpacity - 0.20f) / 0.75f, 0.f, 1.f));
 
 	const float ColorLeft = ColorRows.empty() ? SettingsCard.left + 330.f * Scale : ColorRows.front().left;
 	renderer::draw_text(vec2(ColorLeft, SettingsCard.top + 74.f * Scale), LabelSize, text_align::left, L"COLORS", Theme.Muted);
@@ -2234,15 +2257,13 @@ void UiShell::DrawSettings()
 		renderer::draw_text(vec2(Row.left + 8.f * Scale, RowTop), RowSize, text_align::left, ColorRoles[Index].Name, Theme.Text);
 
 		const color Value = ThemeBase.*(ColorRoles[Index].Field);
-		const rect Swatch(Row.right - 30.f * Scale, Row.center().y - 9.f * Scale, Row.right - 6.f * Scale, Row.center().y + 9.f * Scale);
-
-		renderer::draw_filled_rounded_rect(Swatch, 5.f * Scale, Value);
-		renderer::draw_rounded_rect(Swatch, 5.f * Scale, 1.f * Scale, Hovered ? Theme.Accent : Theme.Border);
+		const rect Swatch = UiSnap(rect(Row.right - 30.f * Scale, Row.center().y - 9.f * Scale, Row.right - 6.f * Scale, Row.center().y + 9.f * Scale));
+		UiFramedRoundedRect(Swatch, 5.f * Scale, std::max(1.f, std::round(Scale)), Hovered ? Theme.Accent : Theme.Border, Value);
 	}
 
 	if (!ColorRows.empty())
 	{
-		renderer::draw_text(vec2(ColorLeft, ColorRows.back().bottom + 8.f * Scale), 9.5f * Scale, text_align::left,
+		renderer::draw_text(vec2(ColorLeft, ColorRows.back().bottom + 8.f * Scale), 11.f * Scale, text_align::left,
 			L"Click a swatch to open the color picker.", Theme.Muted);
 	}
 }
@@ -2279,31 +2300,45 @@ void UiShell::DrawContextMenu()
 
 void UiShell::DrawGear(vec2 Center, float Radius, color Tint)
 {
-	for (int Index = 0; Index < 8; Index++)
+	// The previous hand-drawn gear started its spokes inside the inner ring's band, so the two strokes
+	// overlapped and read as a doubled, floating shape. The icon set keeps them separated.
+	const rect Box(Center.x - Radius, Center.y - Radius, Center.x + Radius, Center.y + Radius);
+	DrawUiIcon(UiIcon::Settings, Box, Tint, 1.6f * Scale);
+}
+
+// Chrome glyphs are drawn at an explicit size centred in their (larger) hit rect, with a hairline-weight
+// stroke, so they sit at the visual weight of the 12-13 px labels next to them instead of filling the box.
+namespace
+{
+	// Whole-pixel stroke for axis-aligned glyph lines (plus, minus, boxes).
+	float HairlineStroke(float Scale)
 	{
-		const float Angle = static_cast<float>(Index) * 0.78539816f;
-		const vec2 Direction(std::cos(Angle), std::sin(Angle));
-		const vec2 Inner(Center.x + Direction.x * Radius * 0.52f, Center.y + Direction.y * Radius * 0.52f);
-		const vec2 Outer(Center.x + Direction.x * Radius, Center.y + Direction.y * Radius);
-		renderer::draw_rounded_line(Inner, Outer, 2.4f * Scale, Tint);
+		return std::max(1.f, std::round(Scale));
 	}
 
-	renderer::draw_circle(Center, Radius * 0.55f, 2.2f * Scale, Tint);
+	// An axis-aligned line of odd pixel width is crisp only when centred on a pixel centre, an even one
+	// only when centred on a pixel edge; otherwise it smears over two rows at partial intensity.
+	rect GlyphBox(rect Bounds, float GlyphSize, float Stroke)
+	{
+		const bool Odd = static_cast<int>(std::round(Stroke)) % 2 == 1;
+		const float Offset = Odd ? 0.5f : 0.f;
+		const vec2 Center(std::floor(Bounds.center().x) + Offset, std::floor(Bounds.center().y) + Offset);
+		const float Half = GlyphSize * 0.5f;
+		return rect(Center.x - Half, Center.y - Half, Center.x + Half, Center.y + Half);
+	}
 }
 
-void UiShell::DrawCloseGlyph(rect Bounds, color Tint)
+void UiShell::DrawCloseGlyph(rect Bounds, float GlyphSize, color Tint)
 {
-	const float Inset = std::min(Bounds.width(), Bounds.height()) * 0.29f;
-	renderer::draw_rounded_line(vec2(Bounds.left + Inset, Bounds.top + Inset), vec2(Bounds.right - Inset, Bounds.bottom - Inset), 1.5f * Scale, Tint);
-	renderer::draw_rounded_line(vec2(Bounds.right - Inset, Bounds.top + Inset), vec2(Bounds.left + Inset, Bounds.bottom - Inset), 1.5f * Scale, Tint);
+	// Diagonals have no pixel grid to align to; a slightly heavier stroke keeps them from looking faint.
+	const float Stroke = 1.2f * Scale;
+	DrawUiIcon(UiIcon::Close, GlyphBox(Bounds, GlyphSize, Stroke), Tint, Stroke);
 }
 
-void UiShell::DrawPlusGlyph(rect Bounds, color Tint)
+void UiShell::DrawPlusGlyph(rect Bounds, float GlyphSize, color Tint)
 {
-	const vec2 Center = Bounds.center();
-	const float Extent = std::min(Bounds.width(), Bounds.height()) * 0.26f;
-	renderer::draw_rounded_line(vec2(Center.x - Extent, Center.y), vec2(Center.x + Extent, Center.y), 1.7f * Scale, Tint);
-	renderer::draw_rounded_line(vec2(Center.x, Center.y - Extent), vec2(Center.x, Center.y + Extent), 1.7f * Scale, Tint);
+	const float Stroke = HairlineStroke(Scale);
+	DrawUiIcon(UiIcon::Plus, GlyphBox(Bounds, GlyphSize, Stroke), Tint, Stroke);
 }
 
 void UiShell::DrawGripGlyph(rect Bounds, color Tint)
@@ -2311,16 +2346,18 @@ void UiShell::DrawGripGlyph(rect Bounds, color Tint)
 	if (Bounds.width() < 2.f || Bounds.height() < 2.f)
 		return;
 
-	const vec2 Center = Bounds.center();
-	const float StepX = 4.f * Scale;
-	const float StepY = 4.5f * Scale;
+	// Dots this small rasterise differently at every sub-pixel offset (one reads as a square, the next as
+	// a plus). Whole-pixel steps from a pixel-corner origin make all six identical.
+	const vec2 Center(std::round(Bounds.center().x), std::round(Bounds.center().y));
+	const float StepX = std::round(4.f * Scale);
+	const float StepY = std::round(5.f * Scale);
 
 	for (int Row = -1; Row <= 1; Row++)
 	{
 		for (int Column = 0; Column <= 1; Column++)
 		{
-			const vec2 Dot(Center.x + (static_cast<float>(Column) - 0.5f) * StepX, Center.y + static_cast<float>(Row) * StepY);
-			renderer::draw_filled_circle(Dot, 1.2f * Scale, Tint);
+			const vec2 Dot(Center.x + (Column == 0 ? -StepX * 0.5f : StepX * 0.5f), Center.y + static_cast<float>(Row) * StepY);
+			renderer::draw_filled_circle(Dot, 1.25f * Scale, Tint);
 		}
 	}
 }

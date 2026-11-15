@@ -100,8 +100,8 @@ private:
 	void DrawContextMenu();
 	void DrawRenameField(const TabRect& Tab, const UiTheme& Theme);
 	void DrawGear(vec2 Center, float Radius, color Tint);
-	void DrawCloseGlyph(rect Bounds, color Tint);
-	void DrawPlusGlyph(rect Bounds, color Tint);
+	void DrawCloseGlyph(rect Bounds, float GlyphSize, color Tint);
+	void DrawPlusGlyph(rect Bounds, float GlyphSize, color Tint);
 	void DrawGripGlyph(rect Bounds, color Tint);
 	void DrawTabStrip(int Group);
 	void DrawTabDropMarker(int Group);

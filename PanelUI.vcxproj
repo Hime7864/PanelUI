@@ -116,6 +116,7 @@
     <ClCompile Include="src\framework.cpp" />
     <ClCompile Include="src\workspace.cpp" />
     <ClCompile Include="src\ui.cpp" />
+    <ClCompile Include="src\icons.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\panelui.h" />
@@ -124,6 +125,7 @@
     <ClInclude Include="include\framework.h" />
     <ClInclude Include="include\workspace.h" />
     <ClInclude Include="include\ui.h" />
+    <ClInclude Include="include\icons.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

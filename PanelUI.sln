@@ -6,6 +6,10 @@ MinimumVisualStudioVersion = 10.0.40219.1
 # that already contains PowerlayGraphics. Build it, then link x64\<Config>\PanelUI.lib.
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PanelUI", "PanelUI.vcxproj", "{A7D4F1C8-3E62-4B95-8C1D-5F2A9B74C6E3}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Demo", "examples\Demo\Demo.vcxproj", "{3C9E5A71-2B48-4F06-9D13-8E7A64C1B2F5}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Tests", "tests\PanelUI.Tests.vcxproj", "{9D2B64E1-5C7A-4F38-8B96-1E4A7C3D5F82}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -16,6 +20,14 @@ Global
 		{A7D4F1C8-3E62-4B95-8C1D-5F2A9B74C6E3}.Debug|x64.Build.0 = Debug|x64
 		{A7D4F1C8-3E62-4B95-8C1D-5F2A9B74C6E3}.Release|x64.ActiveCfg = Release|x64
 		{A7D4F1C8-3E62-4B95-8C1D-5F2A9B74C6E3}.Release|x64.Build.0 = Release|x64
+		{3C9E5A71-2B48-4F06-9D13-8E7A64C1B2F5}.Debug|x64.ActiveCfg = Debug|x64
+		{3C9E5A71-2B48-4F06-9D13-8E7A64C1B2F5}.Debug|x64.Build.0 = Debug|x64
+		{3C9E5A71-2B48-4F06-9D13-8E7A64C1B2F5}.Release|x64.ActiveCfg = Release|x64
+		{3C9E5A71-2B48-4F06-9D13-8E7A64C1B2F5}.Release|x64.Build.0 = Release|x64
+		{9D2B64E1-5C7A-4F38-8B96-1E4A7C3D5F82}.Debug|x64.ActiveCfg = Debug|x64
+		{9D2B64E1-5C7A-4F38-8B96-1E4A7C3D5F82}.Debug|x64.Build.0 = Debug|x64
+		{9D2B64E1-5C7A-4F38-8B96-1E4A7C3D5F82}.Release|x64.ActiveCfg = Release|x64
+		{9D2B64E1-5C7A-4F38-8B96-1E4A7C3D5F82}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

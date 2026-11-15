@@ -2,6 +2,8 @@
 
 #include "graphics.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 struct UiTheme
@@ -34,6 +36,34 @@ inline constexpr float UiTabTextSize = 12.5f;
 inline constexpr float UiBodyTextSize = 13.f;
 inline constexpr float UiTitleTextSize = 15.f;
 inline constexpr float UiRadius = 5.f;
+// Tab strip metrics shared by the layout (workspace.cpp) and the painter (ui.cpp).
+inline constexpr float UiTabTextInset = 12.f;
+inline constexpr float UiTabCloseSize = 18.f;
+inline constexpr float UiTabCloseInset = 6.f;
+
+// Blend between two theme colours; used for derived tones such as control outlines.
+inline color UiMix(color A, color B, float T)
+{
+	return color(A.r + (B.r - A.r) * T, A.g + (B.g - A.g) * T, A.b + (B.b - A.b) * T, A.a + (B.a - A.a) * T);
+}
+
+// Rounds every edge to a whole pixel. Layout snaps its rects so 1 px borders and separators cover one
+// pixel row fully instead of straddling two at half intensity (which reads as a blurred, doubled line).
+// Edges round independently, so rects that share an edge still share it after snapping.
+inline rect UiSnap(rect Value)
+{
+	return rect(std::round(Value.left), std::round(Value.top), std::round(Value.right), std::round(Value.bottom));
+}
+
+// A rounded shape with an outline, drawn as two fills: the edge colour, then the fill inset by Edge.
+// Fill-then-stroke puts two separately anti-aliased silhouettes on every curved edge, which on small
+// shapes (pills, swatches, indicator boxes) shows as a faint halo or a doubled rim.
+inline void UiFramedRoundedRect(rect Bounds, float Radius, float Edge, color EdgeColor, color FillColor)
+{
+	renderer::draw_filled_rounded_rect(Bounds, Radius, EdgeColor);
+	renderer::draw_filled_rounded_rect(rect(Bounds.left + Edge, Bounds.top + Edge, Bounds.right - Edge, Bounds.bottom - Edge),
+		std::max(0.f, Radius - Edge), FillColor);
+}
 
 inline color UiHex(uint32_t Value, float Alpha = 1.f)
 {

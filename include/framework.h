@@ -2,6 +2,7 @@
 
 #include "graphics.hpp"
 #include "theme.h"
+#include "icons.h"
 
 #include <functional>
 #include <string>
@@ -46,7 +47,16 @@ enum class UiNodeKind
 	Separator,
 	Image,
 	ListBox,
-	Collapsible
+	Collapsible,
+	Icon
+};
+
+// How an image is placed inside its widget bounds.
+enum class UiImageFit
+{
+	Contain,  // scaled to fit inside, aspect preserved, letterboxed
+	Cover,    // scaled to fill, aspect preserved, clipped
+	Stretch   // fills the bounds, aspect ignored
 };
 
 enum class UiColorRole
@@ -149,6 +159,8 @@ struct UiNode
 	int Selected = 0;
 	int RadioGroup = 0;
 	texture_id Texture = 0;
+	UiIcon IconGlyph = UiIcon::None;
+	UiImageFit Fit = UiImageFit::Contain;
 	std::vector<std::wstring> Options;
 	float Scroll = 0.f;
 	float ScrollMax = 0.f;
@@ -177,6 +189,7 @@ public:
 	int Text(int Parent, const std::wstring& Value, float Size = 13.f);
 	int Paragraph(int Parent, const std::wstring& Value, float Size = 13.f);
 	int Button(int Parent, const std::wstring& Value, std::function<void()> Click);
+	int Button(int Parent, UiIcon Glyph, const std::wstring& Value, std::function<void()> Click);
 	int Slider(int Parent, const std::wstring& Label, double Min, double Max, double Value, std::function<void(double)> Change, double Step = 0.0);
 	int Input(int Parent, const std::wstring& Value, std::function<void(const std::wstring&)> Submit, const std::wstring& Placeholder = L"");
 	int Dropdown(int Parent, const std::vector<std::wstring>& Options, int Selected, std::function<void(int)> Select);
@@ -186,7 +199,11 @@ public:
 	int RadioGroup(int Parent, const std::vector<std::wstring>& Options, int Selected, std::function<void(int)> Select);
 	int Progress(int Parent, const std::wstring& Label, double Value, double Min = 0.0, double Max = 1.0);
 	int Separator(int Parent);
-	int Image(int Parent, texture_id Texture, float Width, float Height);
+	int Image(int Parent, texture_id Texture, float Width, float Height, UiImageFit Fit = UiImageFit::Contain);
+	// Loads (once, cached by path) and shows an image file. Unsupported or missing files render the
+	// placeholder. Tint comes from Style.TextColor when set.
+	int ImageFile(int Parent, const wchar_t* Path, float Width, float Height, UiImageFit Fit = UiImageFit::Contain);
+	int Icon(int Parent, UiIcon Glyph, float Size = 16.f);
 	int ListBox(int Parent, const std::vector<std::wstring>& Items, int Selected, std::function<void(int)> Select, float Height = 140.f);
 	int Collapsible(int Parent, const std::wstring& Title, bool Expanded, float Padding = 8.f, float Gap = 6.f);
 	int Rect(int Parent, UiPaint Fill);

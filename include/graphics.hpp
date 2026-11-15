@@ -239,6 +239,13 @@ struct renderer
 	static bool create(HWND window);
 	static void destroy();
 	static void set_log_handler(log_handler handler);
+
+	// Multisample anti-aliasing for the whole scene: geometry, images and text are rendered into a
+	// multisampled target and resolved before Present. `samples` is clamped to 1..8 and to what the
+	// device supports; 1 disables it (geometry then falls back to analytic edge coverage only).
+	// Returns the sample count now in effect. Changing it mid-scene takes effect on the next frame.
+	static uint32_t set_multisampling(uint32_t samples);
+	static uint32_t multisampling();
 	static bool set_font(font_id id);
 	static bool select_font(const wchar_t* name);
 	static bool import_font(const wchar_t* name, const wchar_t* filename);

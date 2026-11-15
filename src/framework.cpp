@@ -17,7 +17,21 @@ namespace
 	constexpr float ToggleWidth = 32.f;
 	constexpr float ToggleHeight = 18.f;
 	constexpr float IndicatorGap = 8.f;
+	// Stroke width for outlines that are entirely curved (radio ring, toggle knob). A 1 px stroke on a
+	// circle lands on half-covered pixels; multisampling splits those into two faint columns per side
+	// ("ghosting"). 1.5 px keeps one column fully covered, so the ring reads as one line. Straight-edged
+	// outlines (checkbox box, toggle track) stay at 1 px: their edges sit on pixel boundaries and are
+	// already crisp, and a thicker stroke would just look heavy.
+	constexpr float RingStroke = 1.5f;
 	constexpr int InputMaxLength = 256;
+
+	// A circular stroke reads as one line only when its band falls between pixel boundaries, which needs
+	// the centre on a pixel centre. With the centre on a pixel edge multisampling splits the ring into two
+	// half-covered columns per side ("ghosting").
+	vec2 PixelCentre(vec2 Point)
+	{
+		return vec2(std::floor(Point.x) + 0.5f, std::floor(Point.y) + 0.5f);
+	}
 
 	bool PointInRect(rect Bounds, vec2 Point)
 	{
@@ -64,6 +78,13 @@ namespace
 	{
 		Value.a = 1.f;
 		return Value;
+	}
+
+	// Outline tone for unchecked indicators (checkbox, radio, toggle). Theme.Border is tuned for panel
+	// separators and almost vanishes against the workspace fill an indicator sits on.
+	color ControlEdge(const UiTheme& Theme)
+	{
+		return UiMix(Theme.Border, Theme.Muted, 0.35f);
 	}
 
 	bool IsInteractive(UiNodeKind Kind)
@@ -154,6 +175,41 @@ namespace
 		const vec2 Fitted(Size.x * Factor, Size.y * Factor);
 		const vec2 Center = Bounds.center();
 		return rect(Center.x - Fitted.x * 0.5f, Center.y - Fitted.y * 0.5f, Center.x + Fitted.x * 0.5f, Center.y + Fitted.y * 0.5f);
+	}
+
+	// Fills the bounds with the image, growing past them where the aspect does not match (the caller clips).
+	rect CoverRect(rect Bounds, vec2 Size)
+	{
+		if (Size.x <= 0.f || Size.y <= 0.f)
+			return Bounds;
+
+		const float Factor = std::max(Bounds.width() / Size.x, Bounds.height() / Size.y);
+		const vec2 Fitted(Size.x * Factor, Size.y * Factor);
+		const vec2 Center = Bounds.center();
+		return rect(Center.x - Fitted.x * 0.5f, Center.y - Fitted.y * 0.5f, Center.x + Fitted.x * 0.5f, Center.y + Fitted.y * 0.5f);
+	}
+
+	rect FitImage(rect Bounds, vec2 Size, UiImageFit Fit)
+	{
+		if (Fit == UiImageFit::Stretch || Size.x <= 0.f || Size.y <= 0.f)
+			return Bounds;
+		return Fit == UiImageFit::Cover ? CoverRect(Bounds, Size) : FitRect(Bounds, Size);
+	}
+
+	// Icon size inside a button, and the gap between icon and label.
+	constexpr float ButtonIconGap = 7.f;
+
+	float ButtonIconSize(const UiNode& Item, float ScaleValue)
+	{
+		return std::clamp(Item.Bounds.height() - 14.f * ScaleValue, 12.f * ScaleValue, 18.f * ScaleValue);
+	}
+
+	// Left edge of a button's content block (icon + gap + label), centred in the button.
+	float ButtonContentLeft(const UiNode& Item, float ScaleValue)
+	{
+		const float IconWidth = Item.IconGlyph != UiIcon::None ? ButtonIconSize(Item, ScaleValue) + ButtonIconGap * ScaleValue : 0.f;
+		const float TextWidth = Item.Text.empty() ? 0.f : renderer::measure_text(Item.Text.c_str(), Item.Style.FontSize * ScaleValue).width();
+		return Item.Bounds.center().x - (IconWidth + TextWidth) * 0.5f;
 	}
 }
 
@@ -302,6 +358,13 @@ int PanelContent::Button(int Parent, const std::wstring& Value, std::function<vo
 	return Id;
 }
 
+int PanelContent::Button(int Parent, UiIcon Glyph, const std::wstring& Value, std::function<void()> Click)
+{
+	const int Id = Button(Parent, Value, std::move(Click));
+	Nodes[Id].IconGlyph = Glyph;
+	return Id;
+}
+
 int PanelContent::Slider(int Parent, const std::wstring& Label, double Min, double Max, double Value, std::function<void(double)> Change, double Step)
 {
 	UiStyle Style;
@@ -423,7 +486,7 @@ int PanelContent::Separator(int Parent)
 	return Add(UiNodeKind::Separator, Parent, UiStyle(), L"");
 }
 
-int PanelContent::Image(int Parent, texture_id Texture, float Width, float Height)
+int PanelContent::Image(int Parent, texture_id Texture, float Width, float Height, UiImageFit Fit)
 {
 	UiStyle Style;
 	Style.Align = UiAlign::Start;
@@ -443,6 +506,33 @@ int PanelContent::Image(int Parent, texture_id Texture, float Width, float Heigh
 
 	const int Id = Add(UiNodeKind::Image, Parent, Style, L"");
 	Nodes[Id].Texture = Texture;
+	Nodes[Id].Fit = Fit;
+	return Id;
+}
+
+int PanelContent::ImageFile(int Parent, const wchar_t* Path, float Width, float Height, UiImageFit Fit)
+{
+	// The named-texture registry doubles as the path cache: one texture per path, released with the
+	// renderer (and restored after device loss), so repeated frames do not reload the file.
+	texture_id Texture = Path ? resources::texture(Path) : 0;
+	if (!Texture && Path && *Path)
+		Texture = resources::import_texture(Path, Path);
+
+	return Image(Parent, Texture, Width, Height, Fit);
+}
+
+int PanelContent::Icon(int Parent, UiIcon Glyph, float Size)
+{
+	UiStyle Style;
+	Style.Align = UiAlign::Start;
+	Style.Padding = 2.f;
+	Style.Width = UiSize::Fixed;
+	Style.WidthValue = Size;
+	Style.Height = UiSize::Fixed;
+	Style.HeightValue = Size;
+
+	const int Id = Add(UiNodeKind::Icon, Parent, Style, L"");
+	Nodes[Id].IconGlyph = Glyph;
 	return Id;
 }
 
@@ -695,6 +785,7 @@ void PanelContent::LayoutNode(int Node, rect Bounds)
 		return;
 
 	UiNode& Item = Nodes[Node];
+	Bounds = UiSnap(Bounds);
 	Item.Bounds = Bounds;
 
 	const float Pad = Item.Style.Padding * Scale;
@@ -982,7 +1073,8 @@ float PanelContent::MeasureHeight(int Node, float Width)
 		}
 		return Line + Pad * 2.f;
 	case UiNodeKind::Button:
-		return Line + 14.f * Scale;
+		// Same height as inputs and dropdowns so mixed rows line up; taller only for large fonts.
+		return std::max(30.f * Scale, std::round(Line + 12.f * Scale));
 	case UiNodeKind::Input:
 	case UiNodeKind::Dropdown:
 		return 30.f * Scale;
@@ -998,6 +1090,8 @@ float PanelContent::MeasureHeight(int Node, float Width)
 		return 9.f * Scale;
 	case UiNodeKind::Image:
 		return Item.Texture ? renderer::texture_size(Item.Texture).y * Scale : 64.f * Scale;
+	case UiNodeKind::Icon:
+		return Item.IconGlyph != UiIcon::None ? 16.f * Scale : 0.f;
 	case UiNodeKind::ListBox:
 		return 140.f * Scale;
 	case UiNodeKind::Rect:
@@ -1041,7 +1135,8 @@ float PanelContent::MeasureWidth(int Node, float Height)
 	case UiNodeKind::Text:
 		return renderer::measure_text(Item.Text.c_str(), Font).width() + Pad * 2.f;
 	case UiNodeKind::Button:
-		return renderer::measure_text(Item.Text.c_str(), Font).width() + Pad * 2.f + 12.f * Scale;
+		return renderer::measure_text(Item.Text.c_str(), Font).width() + Pad * 2.f + 12.f * Scale +
+			(Item.IconGlyph != UiIcon::None ? 16.f * Scale + ButtonIconGap * Scale : 0.f);
 	case UiNodeKind::Input:
 	case UiNodeKind::Dropdown:
 	case UiNodeKind::Slider:
@@ -1057,6 +1152,8 @@ float PanelContent::MeasureWidth(int Node, float Height)
 	}
 	case UiNodeKind::Separator:
 		return 9.f * Scale;
+	case UiNodeKind::Icon:
+		return Item.IconGlyph != UiIcon::None ? 16.f * Scale : 0.f;
 	case UiNodeKind::Image:
 		return Item.Texture ? renderer::texture_size(Item.Texture).x * Scale : 64.f * Scale;
 	case UiNodeKind::Rect:
@@ -1102,9 +1199,10 @@ float PanelContent::ListRowHeight() const
 
 rect PanelContent::ScrollTrack(const UiNode& Item) const
 {
-	const float TrackWidth = 4.f * Scale;
-	return rect(Item.Bounds.right - TrackWidth - 3.f * Scale, Item.Bounds.top + 4.f * Scale,
-		Item.Bounds.right - 3.f * Scale, Item.Bounds.bottom - 4.f * Scale);
+	// 6 px: a 4 px pill has a 2 px end radius, which rasterises as a one-pixel nub rather than a curve.
+	const float TrackWidth = std::round(6.f * Scale);
+	const float Right = Item.Bounds.right - std::round(3.f * Scale);
+	return rect(Right - TrackWidth, Item.Bounds.top + 4.f * Scale, Right, Item.Bounds.bottom - 4.f * Scale);
 }
 
 rect PanelContent::ScrollThumb(const UiNode& Item) const
@@ -1114,7 +1212,8 @@ rect PanelContent::ScrollThumb(const UiNode& Item) const
 	const float ThumbHeight = std::min(Track.height(), std::max(24.f * Scale, Track.height() * Visible / (Visible + Item.ScrollMax)));
 	const float Travel = std::max(0.f, Track.height() - ThumbHeight);
 	const float Offset = Item.ScrollMax > 0.f ? (Item.Scroll / Item.ScrollMax) * Travel : 0.f;
-	return rect(Track.left, Track.top + Offset, Track.right, Track.top + Offset + ThumbHeight);
+	const float Top = std::round(Track.top + Offset);
+	return rect(Track.left, Top, Track.right, Top + std::round(ThumbHeight));
 }
 
 float PanelContent::InputScroll(const UiNode& Item) const
@@ -1780,10 +1879,10 @@ void PanelContent::DrawScrollbar(const UiNode& Item, const UiTheme& Theme, float
 	if (Item.ScrollMax <= 0.f || Item.Bounds.width() <= 12.f * ScaleValue)
 		return;
 
+	// Overlay-style scrollbar: no visible track, and a thumb quiet enough not to compete with content.
 	const rect Track = ScrollTrack(Item);
 	const float Radius = Track.width() * 0.5f;
-	renderer::draw_filled_rounded_rect(Track, Radius, WithAlpha(Theme.Border, 0.5f));
-	renderer::draw_filled_rounded_rect(ScrollThumb(Item), Radius, Theme.Muted);
+	renderer::draw_filled_rounded_rect(ScrollThumb(Item), Radius, WithAlpha(Theme.Muted, 0.45f));
 }
 
 void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleValue, vec2 Mouse, bool HoverAllowed, bool Disabled) const
@@ -1830,6 +1929,15 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 
 		renderer::draw_filled_rounded_rect(Item.Bounds, Radius, Tint(Background));
 		renderer::draw_rounded_rect(Item.Bounds, Radius, Line, Tint(ResolvePaint(Item.Style.Border, Theme, UiColorRole::Border)));
+
+		if (Item.IconGlyph != UiIcon::None)
+		{
+			const float IconSize = ButtonIconSize(Item, ScaleValue);
+			const float Left = ButtonContentLeft(Item, ScaleValue);
+			const float Top = Item.Bounds.center().y - IconSize * 0.5f;
+			DrawUiIcon(Item.IconGlyph, rect(Left, Top, Left + IconSize, Top + IconSize),
+				Tint(Item.Enabled ? Theme.Text : WithAlpha(Theme.Muted, 0.45f)));
+		}
 		break;
 	}
 	case UiNodeKind::Input:
@@ -1845,40 +1953,51 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 		renderer::draw_filled_rounded_rect(Item.Bounds, Radius, Tint(Background));
 		renderer::draw_rounded_rect(Item.Bounds, Radius, Line, Tint(Item.Open ? Theme.Accent : ResolvePaint(Item.Style.Border, Theme, UiColorRole::Border)));
 
-		const float Extent = 4.f * ScaleValue;
-		const vec2 Chevron(Item.Bounds.right - 16.f * ScaleValue, Center.y);
-		renderer::draw_rounded_line(vec2(Chevron.x - Extent, Chevron.y - Extent * 0.6f), vec2(Chevron.x, Chevron.y + Extent * 0.4f), 1.4f * ScaleValue, Tint(Theme.Muted));
-		renderer::draw_rounded_line(vec2(Chevron.x, Chevron.y + Extent * 0.4f), vec2(Chevron.x + Extent, Chevron.y - Extent * 0.6f), 1.4f * ScaleValue, Tint(Theme.Muted));
+		// Icon-set chevron (one polyline with a proper join); two separately capped segments overlapped
+		// at the tip and doubled its alpha when the control is disabled.
+		const float Glyph = 16.f * ScaleValue;
+		const vec2 Chevron(std::round(Item.Bounds.right - 16.f * ScaleValue), std::round(Center.y));
+		DrawUiIcon(UiIcon::ChevronDown, rect(Chevron.x - Glyph * 0.5f, Chevron.y - Glyph * 0.5f, Chevron.x + Glyph * 0.5f, Chevron.y + Glyph * 0.5f),
+			Tint(Theme.Muted), 1.4f * ScaleValue);
 		break;
 	}
 	case UiNodeKind::Slider:
 	case UiNodeKind::Progress:
 	{
+		// Label row on top (drawn by DrawTextNode), track pinned to the bottom so the two never overlap.
 		const bool Slider = Item.Kind == UiNodeKind::Slider;
-		const float TrackY = Center.y + 5.f * ScaleValue;
+		const float TrackY = std::round(Item.Bounds.bottom - (Slider ? 9.f : 7.f) * ScaleValue);
 		const float Half = (Slider ? 2.f : 3.f) * ScaleValue;
 		const rect Track(Item.Bounds.left + 6.f * ScaleValue, TrackY - Half, Item.Bounds.right - 6.f * ScaleValue, TrackY + Half);
 		const float FilledRight = Track.left + Track.width() * ValueRatio(Item);
 
-		renderer::draw_filled_rounded_rect(Track, Half, Tint(Theme.Border));
+		renderer::draw_filled_rounded_rect(Track, Half, Tint(UiMix(Theme.Border, Theme.Muted, 0.12f)));
 
 		if (FilledRight > Track.left + 0.5f)
 			renderer::draw_filled_rounded_rect(rect(Track.left, Track.top, FilledRight, Track.bottom), Half, Tint(Theme.Accent));
 
 		if (Slider)
 		{
+			// Accent disc inside a panel-coloured rim (two fills, no stroke), centred on the track's own
+			// pixel row: the knob used to sit half a pixel below the track it rides on.
 			const float Knob = (Hovered ? 7.f : 6.f) * ScaleValue;
-			renderer::draw_filled_circle(vec2(FilledRight, TrackY), Knob, Tint(Theme.Accent));
-			renderer::draw_circle(vec2(FilledRight, TrackY), Knob, 1.f * ScaleValue, Tint(Theme.Border));
+			const vec2 Centre(FilledRight, TrackY);
+			renderer::draw_filled_circle(Centre, Knob, Tint(Opaque(Theme.Panel)));
+			renderer::draw_filled_circle(Centre, std::max(Knob - 1.5f * ScaleValue, 0.5f), Tint(Theme.Accent));
 		}
 		break;
 	}
 	case UiNodeKind::Checkbox:
 	{
 		const float Size = CheckSize * ScaleValue;
-		const rect Box(Item.Bounds.left + Pad, Center.y - Size * 0.5f, Item.Bounds.left + Pad + Size, Center.y + Size * 0.5f);
-		renderer::draw_filled_rounded_rect(Box, 4.f * ScaleValue, Tint(Item.Checked ? Theme.Accent : Theme.Workspace));
-		renderer::draw_rounded_rect(Box, 4.f * ScaleValue, 1.f * ScaleValue, Tint(Item.Checked || Hovered ? Theme.Accent : Theme.Border));
+		const float Top = std::round(Center.y - Size * 0.5f);
+		const rect Box(Item.Bounds.left + Pad, Top, Item.Bounds.left + Pad + Size, Top + Size);
+		const float Corner = 4.f * ScaleValue;
+
+		if (Item.Checked)
+			renderer::draw_filled_rounded_rect(Box, Corner, Tint(Theme.Accent));
+		else
+			UiFramedRoundedRect(Box, Corner, std::max(1.f, std::round(ScaleValue)), Tint(Hovered ? Theme.Accent : ControlEdge(Theme)), Theme.Workspace);
 
 		if (Item.Checked)
 		{
@@ -1886,32 +2005,46 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 			const vec2 A(Box.left + Size * 0.24f, Box.top + Size * 0.52f);
 			const vec2 B(Box.left + Size * 0.42f, Box.top + Size * 0.70f);
 			const vec2 C(Box.left + Size * 0.76f, Box.top + Size * 0.32f);
-			renderer::draw_rounded_line(A, B, 1.8f * ScaleValue, Mark);
-			renderer::draw_rounded_line(B, C, 1.8f * ScaleValue, Mark);
+			renderer::draw_rounded_line(A, B, 1.7f * ScaleValue, Mark);
+			renderer::draw_rounded_line(B, C, 1.7f * ScaleValue, Mark);
 		}
 		break;
 	}
 	case UiNodeKind::Radio:
 	{
+		// The ring is two filled circles rather than a stroked circle: a 1.5 px band is only ~6 samples
+		// wide at 4x, so multisampling breaks it into uneven segments on the diagonals, while filled
+		// circles give a single clean silhouette per edge.
 		const float Ring = CheckSize * 0.5f * ScaleValue;
-		const vec2 Dot(Item.Bounds.left + Pad + Ring, Center.y);
-		renderer::draw_filled_circle(Dot, Ring, Tint(Theme.Workspace));
-		renderer::draw_circle(Dot, Ring, 1.f * ScaleValue, Tint(Item.Checked || Hovered ? Theme.Accent : Theme.Border));
+		const float Stroke = RingStroke * ScaleValue;
+		const vec2 Dot = PixelCentre(vec2(Item.Bounds.left + Pad + Ring, Center.y));
+		const color Ink = Tint(Item.Checked || Hovered ? Theme.Accent : ControlEdge(Theme));
 
+		renderer::draw_filled_circle(Dot, Ring, Ink);
+
+		// Checked: a solid accent disc with a light centre. The old ring + gap + dot packed three
+		// concentric edges into 8 px of radius, which read as a muddy target rather than a selection.
 		if (Item.Checked)
-			renderer::draw_filled_circle(Dot, Ring * 0.5f, Tint(Theme.Accent));
+			renderer::draw_filled_circle(Dot, Ring * 0.38f, Tint(color(1.f, 1.f, 1.f, 1.f)));
+		else
+			renderer::draw_filled_circle(Dot, std::max(Ring - Stroke, 0.5f), Theme.Workspace);
 		break;
 	}
 	case UiNodeKind::Toggle:
 	{
 		const float Height = ToggleHeight * ScaleValue;
-		const rect Track(Item.Bounds.left + Pad, Center.y - Height * 0.5f, Item.Bounds.left + Pad + ToggleWidth * ScaleValue, Center.y + Height * 0.5f);
-		renderer::draw_filled_rounded_rect(Track, Height * 0.5f, Tint(Item.Checked ? Theme.Accent : WithAlpha(Theme.Muted, 0.30f)));
-		renderer::draw_rounded_rect(Track, Height * 0.5f, 1.f * ScaleValue, Tint(Item.Checked || Hovered ? Theme.Accent : Theme.Border));
+		const float Top = std::round(Center.y - Height * 0.5f);
+		const rect Track(Item.Bounds.left + Pad, Top, Item.Bounds.left + Pad + ToggleWidth * ScaleValue, Top + Height);
+		const float KnobY = Track.center().y;
 
-		const float Knob = Height * 0.5f - 3.f * ScaleValue;
+		if (Item.Checked)
+			renderer::draw_filled_rounded_rect(Track, Height * 0.5f, Tint(Theme.Accent));
+		else
+			UiFramedRoundedRect(Track, Height * 0.5f, std::max(1.f, std::round(ScaleValue)), Tint(Hovered ? Theme.Accent : ControlEdge(Theme)), Theme.Workspace);
+
+		const float Knob = Height * 0.5f - 4.f * ScaleValue;
 		const float KnobX = Item.Checked ? Track.right - Height * 0.5f : Track.left + Height * 0.5f;
-		renderer::draw_filled_circle(vec2(KnobX, Center.y), Knob, Tint(Item.Checked ? color(1.f, 1.f, 1.f, 1.f) : Theme.Muted));
+		renderer::draw_filled_circle(vec2(KnobX, KnobY), Knob, Tint(Item.Checked ? color(1.f, 1.f, 1.f, 1.f) : Theme.Muted));
 		break;
 	}
 	case UiNodeKind::Separator:
@@ -1927,13 +2060,28 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 	case UiNodeKind::Image:
 		if (Item.Texture)
 		{
-			renderer::draw_image(Item.Texture, FitRect(Item.Bounds, renderer::texture_size(Item.Texture)), Tint(color(1.f, 1.f, 1.f, 1.f)));
+			const vec2 Size = renderer::texture_size(Item.Texture);
+			const color TintColor = Item.Style.TextColor.Set
+				? Tint(ResolvePaint(Item.Style.TextColor, Theme, UiColorRole::Text))
+				: Tint(color(1.f, 1.f, 1.f, 1.f));
+
+			// Cover grows past the bounds, so it is clipped; the other modes stay inside.
+			if (Item.Fit == UiImageFit::Cover)
+				renderer::push_clip(Item.Bounds);
+
+			renderer::draw_image(Item.Texture, FitImage(Item.Bounds, Size, Item.Fit), TintColor);
+
+			if (Item.Fit == UiImageFit::Cover)
+				renderer::pop_clip();
 		}
 		else
 		{
 			renderer::draw_filled_rounded_rect(Item.Bounds, Radius, Tint(Theme.Header));
 			renderer::draw_rounded_rect(Item.Bounds, Radius, 1.f * ScaleValue, Tint(Theme.Border));
 		}
+		break;
+	case UiNodeKind::Icon:
+		DrawUiIcon(Item.IconGlyph, Item.Bounds, Tint(Theme.Text));
 		break;
 	case UiNodeKind::ListBox:
 	{
@@ -1976,20 +2124,11 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 		if (Item.Style.Border.Set)
 			renderer::draw_rounded_rect(Item.Bounds, Radius, Line, Tint(ResolvePaint(Item.Style.Border, Theme, UiColorRole::Border)));
 
-		const float Extent = 3.5f * ScaleValue;
-		const vec2 Chevron(Header.left + 14.f * ScaleValue, Header.center().y);
-		const color Glyph = Tint(Theme.Muted);
-
-		if (Item.Checked)
-		{
-			renderer::draw_rounded_line(vec2(Chevron.x - Extent, Chevron.y - Extent * 0.5f), vec2(Chevron.x, Chevron.y + Extent * 0.5f), 1.5f * ScaleValue, Glyph);
-			renderer::draw_rounded_line(vec2(Chevron.x, Chevron.y + Extent * 0.5f), vec2(Chevron.x + Extent, Chevron.y - Extent * 0.5f), 1.5f * ScaleValue, Glyph);
-		}
-		else
-		{
-			renderer::draw_rounded_line(vec2(Chevron.x - Extent * 0.5f, Chevron.y - Extent), vec2(Chevron.x + Extent * 0.5f, Chevron.y), 1.5f * ScaleValue, Glyph);
-			renderer::draw_rounded_line(vec2(Chevron.x + Extent * 0.5f, Chevron.y), vec2(Chevron.x - Extent * 0.5f, Chevron.y + Extent), 1.5f * ScaleValue, Glyph);
-		}
+		const float Glyph = 16.f * ScaleValue;
+		const vec2 Chevron(std::round(Header.left + 14.f * ScaleValue), std::round(Header.center().y));
+		DrawUiIcon(Item.Checked ? UiIcon::ChevronDown : UiIcon::ChevronRight,
+			rect(Chevron.x - Glyph * 0.5f, Chevron.y - Glyph * 0.5f, Chevron.x + Glyph * 0.5f, Chevron.y + Glyph * 0.5f),
+			Tint(Theme.Muted), 1.4f * ScaleValue);
 		break;
 	}
 	default:
@@ -2174,7 +2313,16 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 			break;
 
 		renderer::push_clip(rect(Item.Bounds.left + 4.f * ScaleValue, Item.Bounds.top, Item.Bounds.right - 4.f * ScaleValue, Item.Bounds.bottom));
-		DrawTextLine(vec2(Item.Bounds.center().x, CenteredTop), Font, UiAlign::Center, Item.Text.c_str(), TextTint);
+		if (Item.IconGlyph != UiIcon::None)
+		{
+			// Icon buttons lay the label out right of the icon, matching DrawShapesNode.
+			const float TextX = ButtonContentLeft(Item, ScaleValue) + ButtonIconSize(Item, ScaleValue) + ButtonIconGap * ScaleValue;
+			DrawTextLine(vec2(TextX, CenteredTop), Font, UiAlign::Start, Item.Text.c_str(), TextTint);
+		}
+		else
+		{
+			DrawTextLine(vec2(Item.Bounds.center().x, CenteredTop), Font, UiAlign::Center, Item.Text.c_str(), TextTint);
+		}
 		renderer::pop_clip();
 		break;
 	case UiNodeKind::Input:
@@ -2215,8 +2363,11 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 	case UiNodeKind::Slider:
 	case UiNodeKind::Progress:
 	{
-		const float Size = 11.f * ScaleValue;
-		const float Top = Item.Bounds.top + 2.f * ScaleValue;
+		// One step below body text: readable, but subordinate to the control itself. Label and value are
+		// inset to line up with the ends of the track below them.
+		const float Size = (UiBodyTextSize - 1.f) * ScaleValue;
+		const float Inset = 6.f * ScaleValue;
+		const float Top = Item.Bounds.top;
 		wchar_t Buffer[64];
 
 		if (Item.Kind == UiNodeKind::Slider)
@@ -2225,13 +2376,13 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 			swprintf_s(Buffer, L"%.0f%%", ValueRatio(Item) * 100.f);
 
 		const float ValueWidth = renderer::measure_text(Buffer, Size).width();
-		DrawTextLine(vec2(Item.Bounds.right - 4.f * ScaleValue, Top), Size, UiAlign::End, Buffer, MutedTint);
+		DrawTextLine(vec2(Item.Bounds.right - Inset, Top), Size, UiAlign::End, Buffer, MutedTint);
 
 		if (!Item.Text.empty())
 		{
 			// Keep the label from running under the value readout on narrow sliders.
 			renderer::push_clip(rect(Item.Bounds.left, Item.Bounds.top, Item.Bounds.right - ValueWidth - 10.f * ScaleValue, Item.Bounds.bottom));
-			DrawTextLine(vec2(Item.Bounds.left + 4.f * ScaleValue, Top), Size, UiAlign::Start, Item.Text.c_str(), MutedTint);
+			DrawTextLine(vec2(Item.Bounds.left + Inset, Top), Size, UiAlign::Start, Item.Text.c_str(), TextTint);
 			renderer::pop_clip();
 		}
 		break;
@@ -2368,6 +2519,7 @@ void PanelContent::DrawDebugNode(int Node, float ScaleValue) const
 	case UiNodeKind::Image: Label = L"image"; break;
 	case UiNodeKind::ListBox: Label = L"listbox"; break;
 	case UiNodeKind::Collapsible: Label = L"collapsible"; break;
+	case UiNodeKind::Icon: Label = L"icon"; break;
 	default: break;
 	}
 
