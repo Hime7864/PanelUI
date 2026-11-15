@@ -6,6 +6,7 @@
 
 #include <dwmapi.h>
 
+
 #pragma comment(lib, "dwmapi.lib")
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -694,7 +695,9 @@ void UiShell::BuildOccluders()
 	if (PickerOpen)
 		OverlayOccluders.push_back(PickerRect);
 
-	if (Drag.Kind == 1 && Drag.Panel >= 0 && Drag.Panel < static_cast<int>(Workspace.Panels.size()))
+	// Only an active drag paints the ghost (DrawDragOverlay returns unless Drag.Started). Registering
+	// the occluder earlier made a plain press on a tab cut every glyph under the cursor.
+	if (Drag.Kind == 1 && Drag.Started && Drag.Panel >= 0 && Drag.Panel < static_cast<int>(Workspace.Panels.size()))
 		OverlayOccluders.push_back(rect(Mouse.x + 14.f * Scale, Mouse.y + 12.f * Scale,
 			Mouse.x + 14.f * Scale + 164.f * Scale, Mouse.y + 12.f * Scale + 34.f * Scale));
 

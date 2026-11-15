@@ -18,7 +18,8 @@ so a consumer links exactly one file.
 ## Requirements
 
 - Windows 10+, MSVC / ClangCL, C++20, x64.
-- `PowerlayGraphics.lib` present in `third_party/PowerlayGraphics/lib/<Configuration>/`.
+- `PowerlayGraphics.lib` present in `third_party/PowerlayGraphics/lib/<Configuration>/`, built from the
+  same revision as `include/graphics.hpp` (copy both together from the PowerlayGraphics build output).
 - Fonts are **optional**: the renderer's embedded fallback is Segoe UI. Ship `segoeui.ttf` /
   `seguisb.ttf` next to the consumer executable only if you want the named regular/semibold slots;
   without them `UiShell::EnsureStartup` falls back to the embedded face.
@@ -30,8 +31,25 @@ msbuild PanelUI.sln -p:Configuration=Release -p:Platform=x64
 msbuild PanelUI.sln -p:Configuration=Debug   -p:Platform=x64
 ```
 
-Outputs: `x64/<Configuration>/PanelUI.lib` (merged) and `x64/<Configuration>/PanelUI.core.lib`
-(own objects only, intermediate). Only `x64` exists because no x86 graphics archive is vendored.
+Outputs: `x64/<Configuration>/PanelUI.lib` (merged), `x64/<Configuration>/PanelUI.core.lib`
+(own objects only, intermediate), `x64/<Configuration>/PanelUIDemo.exe` and
+`x64/<Configuration>/PanelUI.Tests.exe`. Only `x64` exists because no x86 graphics archive is vendored.
+
+`PanelUI.Tests.exe` drives `UiShell` in-process (no window messages, no DWM capture) and compares the
+renderer's back buffer pixel-for-pixel. Run it after any change to input handling or the text pass; it
+needs an interactive desktop session and exits with the number of failed tests:
+
+```bat
+x64\Release\PanelUI.Tests.exe
+```
+
+In-tree projects link `PanelUI.core.lib` plus the vendored `PowerlayGraphics.lib` directly, so
+incremental builds relink; only consumers outside this repository link the merged `PanelUI.lib`.
+
+`examples/Demo/main.cpp` is the reference host: a borderless, per-monitor DPI-aware window that implements
+the full host-window contract below (including maximized insets and rendering during live resize).
+It also shows docked, tabbed and floating panels, most widget kinds, a runtime texture, and a renderer
+log handler.
 
 ## Consume
 
@@ -113,8 +131,9 @@ int WINAPI wWinMain(HINSTANCE Instance, HINSTANCE, PWSTR, int)
 | `WM_NCCALCSIZE`, `WM_DPICHANGED`, `WM_GETMINMAXINFO` | DPI-correct frame handling (see any prior sample) |
 | `WM_ERASEBKGND` | `return 1;` |
 
-Render loop: call `Ui.Frame()` per frame (`app::run` from PowerlayGraphics does the pump, or drive it
-from a timer during `WM_ENTERSIZEMOVE`).
+Render loop: call `Ui.Frame()` per frame (`app::run` from PowerlayGraphics does the pump and skips
+frames while minimized, or drive it from a timer during `WM_ENTERSIZEMOVE`). Renderer diagnostics
+(missing fonts, device loss and recovery, misuse) go through `renderer::set_log_handler`.
 
 ---
 
@@ -147,15 +166,19 @@ UiShell (ui.h/ui.cpp)            window chrome, dock model owner, tabs, drag/doc
 3. **Callbacks may reallocate the node vector** (`Add`, `Init`, `SetVisible`…). Always copy the
    `std::function` before invoking it — use the `Invoke()` helper in framework.cpp; never call
    `Item.OnClick()` through a reference into `Nodes`.
-4. **Text is rendered in a separate pass after all geometry.** The renderer's scissor does not survive
-   nested clipping for glyphs, so overlap is solved in the framework:
+4. **Text is rendered in a separate pass after all geometry.** Glyphs respect the clip stack (nested
+   clips intersect correctly), but anything opaque drawn later still paints *under* text, so overlap
+   is solved in the framework:
    - `PanelContent::SetOccluders(cuts)` — opaque surfaces (popup, menu, tooltip, settings card,
      drag ghost, every group stacked above) that text must not paint through.
    - `DrawTextLine()` emits per-character runs when a string intersects a cut. Route **all** text
      through it; do not call `renderer::draw_text` directly in a widget branch.
    - `DrawTextNode(..., rect Visible)` culls nodes wholly outside the group viewport.
    If you add an overlay surface, add it to `UiShell::BuildOccluders()` **and** keep its shape opaque
-   (`Opaque(Theme.X)`), otherwise content text shows through it.
+   (`Opaque(Theme.X)`), otherwise content text shows through it. Conversely, register an occluder only
+   while that surface is actually painted in the same frame: `DrawDragOverlay` draws the tab ghost only
+   after `Drag.Started`, so `BuildOccluders` gates on `Drag.Started` too. A stale occluder cuts glyphs
+   with nothing visible to justify it (that was the "text breaks when clicking a tab" bug).
 5. **Layout order is fixed**: flow children first, then `Absolute` children (`DeferredAbsolute`), so
    `AnchorTo` resolves against this frame's bounds. Hidden nodes get zeroed bounds via `HideSubtree`.
 6. **Measurement rules**: a fixed `Width`/`Height` always wins; `Fill`/`Percent` return 0 in

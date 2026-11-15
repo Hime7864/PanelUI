@@ -42,7 +42,6 @@ struct vec2
 
 	vec2() : x(0.f), y(0.f) {}
 	vec2(const POINT& point) : x(static_cast<float>(point.x)), y(static_cast<float>(point.y)) {}
-	vec2(const vec2& other) : x(other.x), y(other.y) {}
 	vec2(const vec3& other);
 	vec2(const vec4& other);
 
@@ -67,7 +66,7 @@ struct vec2
 	float dot(const vec2& rhs) const { return x * rhs.x + y * rhs.y; }
 	float length() const { return std::sqrt(x * x + y * y); }
 	float distance(const vec2& rhs) const { return (rhs - *this).length(); }
-	vec2 normalize() const { const float len = length(); return vec2(x / len, y / len); }
+	vec2 normalize() const { const float len = length(); return len > 0.f ? vec2(x / len, y / len) : vec2(); }
 	vec2 rotate(float angle) const;
 	vec2 rotate(float angle, const vec2& origin) const;
 	vec2 lerp(const vec2& rhs, float t) const { return vec2(x + t * (rhs.x - x), y + t * (rhs.y - y)); }
@@ -86,7 +85,6 @@ struct vec3
 	vec3() : x(0.f), y(0.f), z(0.f) {}
 	vec3(const POINT& point) : x(static_cast<float>(point.x)), y(static_cast<float>(point.y)), z(0.f) {}
 	vec3(const vec2& other) : x(other.x), y(other.y), z(0.f) {}
-	vec3(const vec3& other) : x(other.x), y(other.y), z(other.z) {}
 	vec3(const vec4& other);
 
 	template <typename t0, typename = enable_primitive<t0>>
@@ -114,7 +112,7 @@ struct vec3
 	float length() const { return std::sqrt(x * x + y * y + z * z); }
 	float distance(const vec3& rhs) const { return (rhs - *this).length(); }
 	vec3 cross(const vec3& rhs) const { return vec3(y * rhs.z - z * rhs.y, z * rhs.x - x * rhs.z, x * rhs.y - y * rhs.x); }
-	vec3 normalize() const { const float len = length(); return vec3(x / len, y / len, z / len); }
+	vec3 normalize() const { const float len = length(); return len > 0.f ? vec3(x / len, y / len, z / len) : vec3(); }
 	vec3 rotate(float angle, const vec3& axis) const;
 	vec3 lerp(const vec3& rhs, float t) const { return vec3(x + t * (rhs.x - x), y + t * (rhs.y - y), z + t * (rhs.z - z)); }
 	vec3 reflect(const vec3& normal) const;
@@ -135,7 +133,6 @@ struct vec4
 	vec4(const vec2& other) : x(other.x), y(other.y), z(0.f), w(0.f) {}
 	vec4(const vec2& xy, const vec2& zw) : x(xy.x), y(xy.y), z(zw.x), w(zw.y) {}
 	vec4(const vec3& other) : x(other.x), y(other.y), z(other.z), w(0.f) {}
-	vec4(const vec4& other) : x(other.x), y(other.y), z(other.z), w(other.w) {}
 
 	template <typename t0, typename = enable_primitive<t0>>
 	vec4(t0 value) : x(static_cast<float>(value)), y(static_cast<float>(value)), z(static_cast<float>(value)), w(static_cast<float>(value)) {}
@@ -163,7 +160,7 @@ struct vec4
 
 	float dot(const vec4& rhs) const { return x * rhs.x + y * rhs.y + z * rhs.z + w * rhs.w; }
 	float length() const { return std::sqrt(x * x + y * y + z * z + w * w); }
-	vec4 normalize() const { const float len = length(); return vec4(x / len, y / len, z / len, w / len); }
+	vec4 normalize() const { const float len = length(); return len > 0.f ? vec4(x / len, y / len, z / len, w / len) : vec4(); }
 	vec4 cross(const vec4& rhs) const { return vec4(y * rhs.z - z * rhs.y, z * rhs.x - x * rhs.z, x * rhs.y - y * rhs.x, 0.f); }
 };
 
@@ -225,10 +222,23 @@ struct color
 
 using texture_id = uint32_t;
 
+enum class log_level
+{
+	debug,
+	info,
+	warning,
+	error
+};
+
+// Receives every diagnostic the library emits. `message` has no trailing newline and is only valid
+// for the duration of the call. The default handler writes to OutputDebugString and stderr.
+using log_handler = void (*)(log_level level, const char* message);
+
 struct renderer
 {
 	static bool create(HWND window);
 	static void destroy();
+	static void set_log_handler(log_handler handler);
 	static bool set_font(font_id id);
 	static bool select_font(const wchar_t* name);
 	static bool import_font(const wchar_t* name, const wchar_t* filename);
