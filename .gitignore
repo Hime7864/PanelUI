@@ -1,0 +1,29 @@
+# Build output
+/x64/
+/build/
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.tlog
+*.recipe
+*.lastbuildstate
+*.log
+
+# Produced archives (third_party prebuilt archives stay tracked)
+/PanelUI.lib
+/PanelUI.core.lib
+
+# Visual Studio state
+/.vs/
+*.user
+*.vcxproj.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# OS noise
+Thumbs.db
+desktop.ini
