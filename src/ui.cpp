@@ -259,6 +259,47 @@ void UiShell::SetDefaultPanelBuild(std::function<void(PanelContent&)> Build)
 	DefaultBuild = std::move(Build);
 }
 
+void UiShell::SetPanelCreationEnabled(bool Enabled)
+{
+	PanelCreation = Enabled;
+}
+
+void UiShell::SetAppBarAction(UiIcon Icon, std::wstring Label, std::function<void()> OnClick)
+{
+	AppBarIcon = Icon;
+	AppBarLabel = std::move(Label);
+	AppBarClick = std::move(OnClick);
+}
+
+void UiShell::SetAppBarLabel(std::wstring Label)
+{
+	AppBarLabel = std::move(Label);
+}
+
+void UiShell::RefreshPanels(const std::wstring& Title)
+{
+	PendingRefresh.push_back(Title);
+}
+
+bool UiShell::ActivatePanel(const std::wstring& Title)
+{
+	for (int Panel = 0; Panel < static_cast<int>(Workspace.Panels.size()); Panel++)
+	{
+		if (!Workspace.Panels[Panel].Open || Workspace.Panels[Panel].Title != Title)
+			continue;
+
+		const int Group = Workspace.Panels[Panel].Group;
+		if (Group < 0)
+			return false;
+
+		Workspace.ActivatePanel(Group, Panel);
+		ActiveGroup = Group;
+		return true;
+	}
+
+	return false;
+}
+
 void UiShell::EnsureStartup()
 {
 	const font_id Fallbacks[] =
@@ -325,11 +366,17 @@ void UiShell::EnsureStartup()
 				TargetGroup = Workspace.DefaultGroup();
 		}
 
-		const int Panel = CreatePanelWithContent(Definition.Title, TargetGroup, true, Definition.Build);
+		const int Panel = CreatePanelWithContent(Definition.Title, TargetGroup, Definition.Activate, Definition.Build, Definition.Closable);
 		Created.push_back(Panel);
 
 		if (!Definition.Floating && Index > 0 && Definition.Zone != DockZone::Center && Panel >= 0 && TargetGroup >= 0)
+		{
 			Workspace.DockPanel(Panel, TargetGroup, Definition.Zone, 0);
+
+			// The panel's own share of the split it just created (0.5 keeps the default half split).
+			if (Definition.Share != 0.5f && Panel < static_cast<int>(Workspace.Panels.size()) && Workspace.Panels[Panel].Group >= 0)
+				Workspace.SetGroupShare(Workspace.Panels[Panel].Group, Definition.Share);
+		}
 	}
 
 	if (!Created.empty() && Created[0] >= 0 && Created[0] < static_cast<int>(Workspace.Panels.size()))
@@ -342,12 +389,15 @@ void UiShell::EnsureStartup()
 	Ready = true;
 }
 
-int UiShell::CreatePanelWithContent(const std::wstring& Title, int Group, bool Activate, const std::function<void(PanelContent&)>& Build)
+int UiShell::CreatePanelWithContent(const std::wstring& Title, int Group, bool Activate, const std::function<void(PanelContent&)>& Build, bool Closable)
 {
 	const int Panel = Workspace.CreatePanel(Title, Group, Activate);
 
 	if (Panel >= 0)
+	{
+		Workspace.Panels[Panel].Closable = Closable;
 		EnsurePanelContent(Panel, Build);
+	}
 
 	return Panel;
 }
@@ -367,13 +417,22 @@ void UiShell::EnsurePanelContent(int Panel, const std::function<void(PanelConten
 	}
 
 	if (Panel >= static_cast<int>(PanelContents.size()))
+	{
 		PanelContents.resize(Workspace.Panels.size());
+		PanelBuilds.resize(Workspace.Panels.size());
+	}
+
+	PanelBuilds[Panel] = Build;
 
 	std::unique_ptr<PanelContent> Content = std::make_unique<PanelContent>();
 
 	// No Build callback means an empty panel: the library never invents content.
 	if (Build)
 		Build(*Content);
+
+	// A refresh rebuilds the nodes; keep what the user arranged (scroll, open sections, selection).
+	if (PanelContents[Panel])
+		Content->AdoptViewState(*PanelContents[Panel]);
 
 	PanelContents[Panel] = std::move(Content);
 }
@@ -489,6 +548,9 @@ void UiShell::DrawGroupContentText(int Group, const UiTheme& Theme, const std::v
 		return;
 
 	const rect Bounds = GroupContentBounds(Group);
+
+	// The settings scrim darkens the workspace; panel glyphs fade with it so they cannot sit bright on top.
+	Content->SetTextAlpha(SettingsOpen ? 0.45f : 1.f);
 
 	for (const rect& Visible : Clips)
 	{
@@ -667,15 +729,39 @@ void UiShell::UpdateHover(float Delta)
 	TooltipBox = rect(Left, Top, Left + Width, Top + Height);
 }
 
-bool UiShell::OccludedByOverlay(rect Area) const
+void UiShell::DrawOverlayClippedText(vec2 Point, float Size, const wchar_t* Text, color Tint) const
 {
+	// Text is batched after all geometry, so an overlay cannot paint over it. Draw the whole string once
+	// per region left visible around the overlays; the scissor cuts glyphs at the overlay edge exactly.
+	const rect Area = renderer::text_bounds(Point, Size, text_align::left, Text);
+	const float Margin = renderer::line_height(Size);
+	const rect Bounds(Area.left - Margin, Area.top - Margin, Area.right + Margin, Area.bottom + Margin);
+	std::vector<rect> Pieces{ Bounds };
+	bool Covered = false;
+
 	for (const rect& Cut : OverlayOccluders)
 	{
-		if (Area.left < Cut.right && Cut.left < Area.right && Area.top < Cut.bottom && Cut.top < Area.bottom)
-			return true;
+		const rect Overlap = IntersectRect(Bounds, Cut);
+
+		if (Overlap.width() <= 0.f || Overlap.height() <= 0.f)
+			continue;
+
+		Covered = true;
+		Pieces = SubtractRect(Pieces, Cut);
 	}
 
-	return false;
+	if (!Covered)
+	{
+		renderer::draw_text(Point, Size, text_align::left, Text, Tint);
+		return;
+	}
+
+	for (const rect& Piece : Pieces)
+	{
+		renderer::push_clip(Piece);
+		renderer::draw_text(Point, Size, text_align::left, Text, Tint);
+		renderer::pop_clip();
+	}
 }
 
 void UiShell::BuildOccluders()
@@ -764,6 +850,7 @@ rect UiShell::PickerCloseRect() const
 void UiShell::UpdateMetrics()
 {
 	ClientSize = renderer::display_size();
+	Workspace.AllowNewTabs = PanelCreation;
 
 	const float BarHeight = UiAppBarHeight * Scale;
 	const float Pad = 8.f * Scale;
@@ -775,6 +862,17 @@ void UiShell::UpdateMetrics()
 	SettingsButton = rect(10.f * Scale, (BarHeight - ButtonSize) * 0.5f,
 		10.f * Scale + ButtonSize, (BarHeight + ButtonSize) * 0.5f);
 
+	if (!AppBarLabel.empty())
+	{
+		const float LabelWidth = renderer::measure_text(AppBarLabel.c_str(), UiBodyTextSize * Scale).width();
+		const float ActionLeft = SettingsButton.right + 8.f * Scale;
+		AppBarButton = UiSnap(rect(ActionLeft, SettingsButton.top, ActionLeft + LabelWidth + 44.f * Scale, SettingsButton.bottom));
+	}
+	else
+	{
+		AppBarButton = rect();
+	}
+
 	const float ControlWidth = 46.f * Scale;
 	WindowClose = rect(ClientSize.x - ControlWidth, 0.f, ClientSize.x, BarHeight);
 	WindowMax = rect(ClientSize.x - ControlWidth * 2.f, 0.f, ClientSize.x - ControlWidth, BarHeight);
@@ -782,14 +880,22 @@ void UiShell::UpdateMetrics()
 
 	// Button edges are snapped so their 1 px outlines land on one pixel row instead of two half-lit ones.
 	const float NewRight = WindowMin.left - 10.f * Scale;
-	const float NewTextWidth = renderer::measure_text(L"New Panel", UiBodyTextSize * Scale).width();
-	const float NewWidth = NewTextWidth + 44.f * Scale;
-	NewPanelButton = UiSnap(rect(NewRight - NewWidth, (BarHeight - ButtonSize) * 0.5f,
-		NewRight, (BarHeight + ButtonSize) * 0.5f));
 
-	const float DebugWidth = renderer::measure_text(L"Rects", UiBodyTextSize * Scale).width() + 28.f * Scale;
-	DebugButton = UiSnap(rect(NewPanelButton.left - 8.f * Scale - DebugWidth, (BarHeight - ButtonSize) * 0.5f,
-		NewPanelButton.left - 8.f * Scale, (BarHeight + ButtonSize) * 0.5f));
+	if (PanelCreation)
+	{
+		const float NewTextWidth = renderer::measure_text(L"New Panel", UiBodyTextSize * Scale).width();
+		const float NewWidth = NewTextWidth + 44.f * Scale;
+		NewPanelButton = UiSnap(rect(NewRight - NewWidth, (BarHeight - ButtonSize) * 0.5f,
+			NewRight, (BarHeight + ButtonSize) * 0.5f));
+	}
+	else
+	{
+		NewPanelButton = rect();
+	}
+
+	const float DebugRight = PanelCreation ? NewPanelButton.left - 8.f * Scale : NewRight;
+	DebugButton = UiSnap(rect(DebugRight - ButtonSize, (BarHeight - ButtonSize) * 0.5f,
+		DebugRight, (BarHeight + ButtonSize) * 0.5f));
 
 	const float CardWidth = 700.f * Scale;
 	const float CardHeight = 430.f * Scale;
@@ -877,6 +983,23 @@ void UiShell::Frame()
 	if (ActiveGroup >= 0 && (ActiveGroup >= static_cast<int>(Workspace.Groups.size()) || !Workspace.Groups[ActiveGroup].InUse))
 		ActiveGroup = Workspace.DefaultGroup();
 
+	if (!PendingRefresh.empty())
+	{
+		for (const std::wstring& Pending : PendingRefresh)
+		{
+			for (int Panel = 0; Panel < static_cast<int>(Workspace.Panels.size()); Panel++)
+			{
+				if (!Workspace.Panels[Panel].Open || Workspace.Panels[Panel].Title != Pending)
+					continue;
+
+				if (Panel < static_cast<int>(PanelBuilds.size()) && PanelBuilds[Panel])
+					EnsurePanelContent(Panel, PanelBuilds[Panel]);
+			}
+		}
+
+		PendingRefresh.clear();
+	}
+
 	LayoutContents(Delta);
 	BuildGroupClips();
 	UpdateHover(Delta);
@@ -934,39 +1057,46 @@ void UiShell::DrawAppBar()
 
 	DrawGear(SettingsButton.center(), 8.f * Scale, SettingsHover || SettingsOpen ? Theme.Text : Theme.Muted);
 
+	if (AppBarButton.width() > 0.f)
+	{
+		const bool ActionHover = BarHover && PointInRect(AppBarButton, Mouse);
+		renderer::draw_filled_rounded_rect(AppBarButton, 6.f * Scale, ActionHover ? Theme.TabHover : Theme.Header);
+		renderer::draw_rounded_rect(AppBarButton, 6.f * Scale, 1.f, Theme.Border);
+
+		const float IconSize = 16.f * Scale;
+		const rect IconBox(AppBarButton.left + 8.f * Scale, AppBarButton.center().y - IconSize * 0.5f,
+			AppBarButton.left + 8.f * Scale + IconSize, AppBarButton.center().y + IconSize * 0.5f);
+		DrawUiIcon(AppBarIcon, IconBox, ActionHover ? Theme.Text : Theme.Muted, 1.4f * Scale);
+
+		const float ActionTextSize = UiBodyTextSize * Scale;
+		const vec2 ActionPoint(IconBox.right + 6.f * Scale, AppBarButton.center().y - renderer::line_height(ActionTextSize) * 0.5f);
+
+		DrawOverlayClippedText(ActionPoint, ActionTextSize, AppBarLabel.c_str(), WithAlpha(Theme.Text, SettingsOpen ? 0.45f : 1.f));
+	}
+
 	const float TitleSize = UiTitleTextSize * Scale;
 	const float TitleTop = AppBarRect.center().y - renderer::line_height(TitleSize) * 0.5f;
-	const vec2 TitlePoint(SettingsButton.right + 12.f * Scale, TitleTop);
+	const float TitleLeft = (AppBarButton.width() > 0.f ? AppBarButton.right : SettingsButton.right) + 12.f * Scale;
+	const vec2 TitlePoint(TitleLeft, TitleTop);
 
-	if (!OccludedByOverlay(renderer::text_bounds(TitlePoint, TitleSize, text_align::left, Title.c_str())))
-		renderer::draw_text(TitlePoint, TitleSize, text_align::left, Title.c_str(), Theme.Text);
+	DrawOverlayClippedText(TitlePoint, TitleSize, Title.c_str(), WithAlpha(Theme.Text, SettingsOpen ? 0.45f : 1.f));
 
-	const bool DebugHover = BarHover && PointInRect(DebugButton, Mouse);
-	renderer::draw_filled_rounded_rect(DebugButton, 6.f * Scale, DebugHover ? Theme.TabHover : Theme.Header);
-	renderer::draw_rounded_rect(DebugButton, 6.f * Scale, 1.f, DebugRects ? Theme.Accent : Theme.Border);
+	if (PanelCreation && NewPanelButton.width() > 0.f)
+	{
+		const bool NewHover = BarHover && PointInRect(NewPanelButton, Mouse);
+		renderer::draw_filled_rounded_rect(NewPanelButton, 6.f * Scale, NewHover ? Theme.TabHover : Theme.Header);
+		renderer::draw_rounded_rect(NewPanelButton, 6.f * Scale, 1.f, Theme.Border);
 
-	const float DebugTextSize = UiBodyTextSize * Scale;
-	const float DebugTextTop = DebugButton.center().y - renderer::line_height(DebugTextSize) * 0.5f;
-	const vec2 DebugPoint(DebugButton.center().x, DebugTextTop);
+		const float PlusBox = 16.f * Scale;
+		const rect PlusRect(NewPanelButton.left + 8.f * Scale, NewPanelButton.top, NewPanelButton.left + 8.f * Scale + PlusBox, NewPanelButton.bottom);
+		DrawPlusGlyph(PlusRect, 14.f * Scale, Theme.Accent);
 
-	if (!OccludedByOverlay(renderer::text_bounds(DebugPoint, DebugTextSize, text_align::center, L"Rects")))
-		renderer::draw_text(DebugPoint, DebugTextSize, text_align::center, L"Rects",
-			DebugRects ? Theme.Accent : (DebugHover ? Theme.Text : Theme.Muted));
+		const float TextSize = UiBodyTextSize * Scale;
+		const float TextTop = NewPanelButton.center().y - renderer::line_height(TextSize) * 0.5f;
+		const vec2 NewPoint(PlusRect.right + 6.f * Scale, TextTop);
 
-	const bool NewHover = BarHover && PointInRect(NewPanelButton, Mouse);
-	renderer::draw_filled_rounded_rect(NewPanelButton, 6.f * Scale, NewHover ? Theme.TabHover : Theme.Header);
-	renderer::draw_rounded_rect(NewPanelButton, 6.f * Scale, 1.f, Theme.Border);
-
-	const float PlusBox = 16.f * Scale;
-	const rect PlusRect(NewPanelButton.left + 8.f * Scale, NewPanelButton.top, NewPanelButton.left + 8.f * Scale + PlusBox, NewPanelButton.bottom);
-	DrawPlusGlyph(PlusRect, 14.f * Scale, Theme.Accent);
-
-	const float TextSize = UiBodyTextSize * Scale;
-	const float TextTop = NewPanelButton.center().y - renderer::line_height(TextSize) * 0.5f;
-	const vec2 NewPoint(PlusRect.right + 6.f * Scale, TextTop);
-
-	if (!OccludedByOverlay(renderer::text_bounds(NewPoint, TextSize, text_align::left, L"New Panel")))
-		renderer::draw_text(NewPoint, TextSize, text_align::left, L"New Panel", Theme.Text);
+		DrawOverlayClippedText(NewPoint, TextSize, L"New Panel", WithAlpha(Theme.Text, SettingsOpen ? 0.45f : 1.f));
+	}
 
 	const bool Maximized = IsZoomed(Window) != 0;
 	const rect Controls[3] = { WindowMin, WindowMax, WindowClose };
@@ -1151,23 +1281,8 @@ void UiShell::DrawGroupText(int Group)
 		const float TextRight = Tab.Close.width() > 0.f ? Tab.Close.left - 2.f * Scale : Tab.Bounds.right - 4.f * Scale;
 		const rect TextClip(Tab.Bounds.left + 2.f * Scale, Tab.Bounds.top, TextRight, Tab.Bounds.bottom);
 
-		if (OccludedByOverlay(TextClip))
-			continue;
-
-		bool CutOut = false;
-
-		for (const rect& Cut : Cuts)
-		{
-			if (TextClip.left < Cut.right && Cut.left < TextClip.right && TextClip.top < Cut.bottom && Cut.top < TextClip.bottom)
-			{
-				CutOut = true;
-				break;
-			}
-		}
-
-		if (CutOut)
-			continue;
-
+		// Clips already exclude every overlay and higher floating group, so covered parts of the label are
+		// scissored away instead of the whole label disappearing.
 		for (const rect& Visible : Clips)
 		{
 			const rect Clip = IntersectRect(TextClip, Visible);
@@ -1185,7 +1300,7 @@ void UiShell::DrawGroupText(int Group)
 			{
 				const float Top = Tab.Bounds.center().y - renderer::line_height(Size) * 0.5f;
 				renderer::draw_text(vec2(Tab.Bounds.left + UiTabTextInset * Scale, Top), Size, text_align::left,
-					Workspace.Panels[Tab.Panel].Title.c_str(), Active ? Theme.Text : Theme.Muted);
+					Workspace.Panels[Tab.Panel].Title.c_str(), WithAlpha(Active ? Theme.Text : Theme.Muted, SettingsOpen ? 0.45f : 1.f));
 			}
 
 			renderer::pop_clip();
@@ -1296,11 +1411,14 @@ void UiShell::DrawTabStrip(int GroupIndex)
 		}
 	}
 
-	const bool NewHover = HoverHere && PointInRect(Item.NewTab, Mouse);
-	if (NewHover)
-		renderer::draw_filled_rounded_rect(Item.NewTab, 5.f * Scale, Theme.TabHover);
+	if (Item.NewTab.width() > 1.f)
+	{
+		const bool NewHover = HoverHere && PointInRect(Item.NewTab, Mouse);
+		if (NewHover)
+			renderer::draw_filled_rounded_rect(Item.NewTab, 5.f * Scale, Theme.TabHover);
 
-	DrawPlusGlyph(Item.NewTab, 15.f * Scale, NewHover ? Theme.Text : Theme.Muted);
+		DrawPlusGlyph(Item.NewTab, 15.f * Scale, NewHover ? Theme.Text : Theme.Muted);
+	}
 }
 
 void UiShell::DrawTabDropMarker(int Group)
@@ -2147,7 +2265,9 @@ void UiShell::DrawSettings()
 {
 	const UiTheme& Theme = CurrentTheme();
 
-	renderer::draw_shadow(SettingsCard, 30.f * Scale, Theme.Shadow);
+	// Flat card: no drop shadow, so the settings read as part of the shell instead of floating above it.
+	// The workspace behind it is darkened to focus the dialog; text is faded to match by the text pass.
+	renderer::draw_filled_rect(rect(0.f, 0.f, ClientSize.x, ClientSize.y), color(0.f, 0.f, 0.f, 0.55f));
 	renderer::draw_filled_rounded_rect(SettingsCard, 14.f * Scale, Opaque(Theme.Panel));
 	renderer::draw_rounded_rect(SettingsCard, 14.f * Scale, 1.f, Theme.Border);
 
@@ -2277,23 +2397,40 @@ void UiShell::DrawContextMenu()
 	renderer::draw_rounded_rect(MenuRect, 8.f * Scale, 1.f * Scale, Theme.MenuBorder);
 
 	const float ItemSize = UiBodyTextSize * Scale;
-	const float SeparatorY = TabMenuItemRect(3).top - 3.5f * Scale;
-	renderer::draw_filled_rect(rect(MenuRect.left + 8.f * Scale, SeparatorY, MenuRect.right - 8.f * Scale, SeparatorY + Scale), Theme.MenuBorder);
 
-	for (int Index = 0; Index < 5; Index++)
+	// The rule sits above the first destructive row, which is absent entirely for a fixed panel.
+	int FirstDestructive = -1;
+
+	for (int Index = 0; Index < TabMenuCount(); Index++)
+	{
+		if (TabMenuAction(Index) >= 3)
+		{
+			FirstDestructive = Index;
+			break;
+		}
+	}
+
+	if (FirstDestructive > 0)
+	{
+		const float SeparatorY = TabMenuItemRect(FirstDestructive).top - 3.5f * Scale;
+		renderer::draw_filled_rect(rect(MenuRect.left + 8.f * Scale, SeparatorY, MenuRect.right - 8.f * Scale, SeparatorY + Scale), Theme.MenuBorder);
+	}
+
+	for (int Index = 0; Index < TabMenuCount(); Index++)
 	{
 		const rect Row = TabMenuItemRect(Index);
 		const bool Hovered = MenuHover == Index;
+		const int Action = TabMenuAction(Index);
 
 		if (Hovered)
 			renderer::draw_filled_rounded_rect(Row, 5.f * Scale, Theme.MenuHover);
 
-		const bool Destructive = Index >= 3;
+		const bool Destructive = Action >= 3;
 		const color Tint = Theme.Text;
 		const color Danger = Theme.Danger;
 		const float Top = Row.center().y - renderer::line_height(ItemSize) * 0.5f;
 
-		renderer::draw_text(vec2(Row.left + 10.f * Scale, Top), ItemSize, text_align::left, TabMenuLabels[Index],
+		renderer::draw_text(vec2(Row.left + 10.f * Scale, Top), ItemSize, text_align::left, TabMenuLabels[Action],
 			Destructive ? Danger : Tint);
 	}
 }
@@ -2447,7 +2584,7 @@ void UiShell::HandleGroupPress(int GroupIndex, vec2 Point, bool Floating)
 		}
 	}
 
-	if (PointInRect(Item.NewTab, Point))
+	if (Item.NewTab.width() > 1.f && PointInRect(Item.NewTab, Point))
 	{
 		AddPanelToGroup(GroupIndex);
 		return;
@@ -2910,7 +3047,7 @@ void UiShell::OnMouseDown(vec2 Point)
 		MenuHover = -1;
 
 		if (Action >= 0)
-			ExecuteTabMenu(Action);
+			ExecuteTabMenu(TabMenuAction(Action));
 
 		return;
 	}
@@ -3040,10 +3177,12 @@ void UiShell::OnMouseDown(vec2 Point)
 		return;
 	}
 
-	if (PointInRect(DebugButton, Point))
+	if (AppBarButton.width() > 0.f && PointInRect(AppBarButton, Point))
 	{
-		DebugRects = !DebugRects;
 		Drag = DragInfo{};
+		std::function<void()> Click = AppBarClick;
+		if (Click)
+			Click();
 		return;
 	}
 
@@ -3159,7 +3298,7 @@ void UiShell::OnMouseUp(vec2 Point)
 	UpdateHoverCursor(Point);
 }
 
-void UiShell::OnMouseWheel(float Delta, vec2 Point)
+void UiShell::OnMouseWheel(float Delta, vec2 Point, bool Horizontal)
 {
 	if (!Ready || ModalOpen() || Drag.Kind != 0)
 		return;
@@ -3204,7 +3343,7 @@ void UiShell::OnMouseWheel(float Delta, vec2 Point)
 	if (!Content || !PointInRect(GroupContentBounds(Group), Point))
 		return;
 
-	Content->OnWheel(Point, Delta);
+	Content->OnWheel(Point, Delta, Horizontal);
 }
 
 void UiShell::OnMouseLeave()
@@ -3246,12 +3385,6 @@ void UiShell::OnKeyDown(int Key)
 			RenameText.clear();
 			return;
 		}
-	}
-
-	if (Key == VK_F1)
-	{
-		DebugRects = !DebugRects;
-		return;
 	}
 
 	if (Key == VK_ESCAPE)
@@ -3389,6 +3522,30 @@ void UiShell::OnRightMouseDown(vec2 Point)
 			return;
 		}
 	}
+
+	if (PointInRect(GroupContentBounds(Group), Point))
+	{
+		PanelContent* Content = ActiveContent(Group);
+
+		if (Content && Content->OnRightMouseDown(Point))
+		{
+			ActiveGroup = Group;
+			FocusedPanel = ActivePanel(Group);
+		}
+	}
+}
+
+int UiShell::TabMenuCount() const
+{
+	return static_cast<int>(TabMenuItems.size());
+}
+
+int UiShell::TabMenuAction(int Index) const
+{
+	if (Index < 0 || Index >= static_cast<int>(TabMenuItems.size()))
+		return -1;
+
+	return TabMenuItems[static_cast<size_t>(Index)];
 }
 
 rect UiShell::TabMenuItemRect(int Index) const
@@ -3398,7 +3555,7 @@ rect UiShell::TabMenuItemRect(int Index) const
 	const float Separator = 7.f * Scale;
 	float Top = MenuRect.top + Pad + static_cast<float>(Index) * ItemHeight;
 
-	if (Index >= 3)
+	if (TabMenuAction(Index) >= 3)
 		Top += Separator;
 
 	return rect(MenuRect.left + Pad, Top, MenuRect.right - Pad, Top + ItemHeight);
@@ -3409,7 +3566,7 @@ int UiShell::TabMenuHit(vec2 Point) const
 	if (!MenuOpen)
 		return -1;
 
-	for (int Index = 0; Index < 5; Index++)
+	for (int Index = 0; Index < TabMenuCount(); Index++)
 	{
 		if (PointInRect(TabMenuItemRect(Index), Point))
 			return Index;
@@ -3423,11 +3580,38 @@ void UiShell::OpenTabMenu(int Group, int Panel, vec2 Point)
 	if (Group < 0 || Group >= static_cast<int>(Workspace.Groups.size()) || !Workspace.Groups[Group].InUse)
 		return;
 
+	// Rows follow the panel's flags: a panel that cannot be closed gets no close actions, and "Close
+	// others" only appears when another panel in the group could actually be closed.
+	TabMenuItems.clear();
+	TabMenuItems.push_back(0);
+	TabMenuItems.push_back(1);
+
+	if (PanelCreation)
+		TabMenuItems.push_back(2);
+
+	const bool Closable = Panel >= 0 && Panel < static_cast<int>(Workspace.Panels.size()) && Workspace.Panels[Panel].Closable;
+
+	if (Closable)
+		TabMenuItems.push_back(3);
+
+	bool OthersClosable = false;
+
+	for (int Other : Workspace.Groups[Group].Panels)
+	{
+		if (Other != Panel && Other >= 0 && Other < static_cast<int>(Workspace.Panels.size()) && Workspace.Panels[Other].Closable)
+			OthersClosable = true;
+	}
+
+	if (OthersClosable)
+		TabMenuItems.push_back(4);
+
 	const float ItemHeight = 30.f * Scale;
 	const float Pad = 6.f * Scale;
 	const float Separator = 7.f * Scale;
 	const float Width = 190.f * Scale;
-	const float Height = Pad * 2.f + ItemHeight * 5.f + Separator;
+	const bool Destructive = std::find(TabMenuItems.begin(), TabMenuItems.end(), 3) != TabMenuItems.end() ||
+		std::find(TabMenuItems.begin(), TabMenuItems.end(), 4) != TabMenuItems.end();
+	const float Height = Pad * 2.f + ItemHeight * static_cast<float>(TabMenuCount()) + (Destructive ? Separator : 0.f);
 
 	const float Left = std::clamp(Point.x, 4.f * Scale, std::max(4.f * Scale, ClientSize.x - Width - 4.f * Scale));
 	const float Top = std::clamp(Point.y, 4.f * Scale, std::max(4.f * Scale, ClientSize.y - Height - 4.f * Scale));
@@ -3594,7 +3778,7 @@ LRESULT UiShell::HitTest(vec2 Point) const
 	if (Point.y < AppBarRect.bottom)
 	{
 		if (PointInRect(WindowMin, Point) || PointInRect(WindowMax, Point) || PointInRect(WindowClose, Point) ||
-			PointInRect(SettingsButton, Point) || PointInRect(NewPanelButton, Point) || PointInRect(DebugButton, Point))
+			PointInRect(SettingsButton, Point) || PointInRect(AppBarButton, Point) || PointInRect(NewPanelButton, Point))
 			return HTCLIENT;
 
 		return HTCAPTION;

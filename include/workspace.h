@@ -24,6 +24,7 @@ struct PanelItem
 	bool Open = false;
 	int Group = -1;
 	std::wstring Title;
+	bool Closable = true;
 };
 
 struct TabRect
@@ -88,6 +89,8 @@ public:
 	void RestoreRoot(int Group, rect Area);
 	void DockGroupToEdge(int Group, DockZone Zone, rect Area);
 	void DockPanelToEdge(int Panel, DockZone Zone, rect Area);
+	// Sets how much of its parent split this group's leaf occupies (0.05..0.95).
+	bool SetGroupShare(int Group, float Share);
 	int GroupAt(vec2 Point) const;
 	int GroupAt(vec2 Point, int IgnoreGroup) const;
 	int DividerAt(vec2 Point) const;
@@ -101,6 +104,8 @@ public:
 	std::vector<int> FloatingOrder;
 	int Root = -1;
 	float LayoutScale = 1.f;
+	// Cleared by the shell when it suppresses panel creation: no "+" button in group headers.
+	bool AllowNewTabs = true;
 
 private:
 	int AllocPanel();

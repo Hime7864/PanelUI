@@ -1,15 +1,21 @@
 #include "framework.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cmath>
+#include <cwctype>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
 namespace
 {
 	constexpr float CollapsibleHeader = 30.f;
+	constexpr float CollapsibleIndent = 10.f;
 	constexpr float ListRow = 26.f;
 	constexpr float ListPad = 4.f;
+	constexpr float TableHeader = 26.f;
 	constexpr float DropdownRow = 28.f;
 	constexpr float DropdownPad = 4.f;
 	constexpr int DropdownMaxRows = 8;
@@ -100,6 +106,7 @@ namespace
 		case UiNodeKind::Radio:
 		case UiNodeKind::ListBox:
 		case UiNodeKind::Collapsible:
+		case UiNodeKind::DragHandle:
 			return true;
 		default:
 			return false;
@@ -114,7 +121,279 @@ namespace
 
 	bool IsScrollable(const UiNode& Item)
 	{
-		return Item.Kind == UiNodeKind::ListBox || Item.Style.Scroll;
+		return Item.Kind == UiNodeKind::ListBox || Item.Style.Scroll || Item.Style.ScrollX;
+	}
+
+	void CopyTextToClipboard(const std::wstring& Text)
+	{
+		if (!OpenClipboard(nullptr))
+			return;
+
+		EmptyClipboard();
+
+		const size_t Bytes = (Text.size() + 1) * sizeof(wchar_t);
+		HGLOBAL Memory = GlobalAlloc(GMEM_MOVEABLE, Bytes);
+
+		if (Memory)
+		{
+			void* Destination = GlobalLock(Memory);
+
+			if (Destination)
+			{
+				memcpy(Destination, Text.c_str(), Bytes);
+				GlobalUnlock(Memory);
+				SetClipboardData(CF_UNICODETEXT, Memory);
+				Memory = nullptr;
+			}
+		}
+
+		if (Memory)
+			GlobalFree(Memory);
+
+		CloseClipboard();
+	}
+
+	bool MenuHasSeparator(const UiNode& Item, int Index)
+	{
+		return std::find(Item.MenuSeparators.begin(), Item.MenuSeparators.end(), Index) != Item.MenuSeparators.end();
+	}
+
+	bool MenuItemDisabled(const UiNode& Item, int Index)
+	{
+		return std::find(Item.MenuDisabled.begin(), Item.MenuDisabled.end(), Index) != Item.MenuDisabled.end();
+	}
+
+	// The title row is optional; items start below it (or at the top padding when there is no title).
+	float MenuItemsOffset(const UiNode& Item, float ScaleValue)
+	{
+		return (Item.MenuTitle.empty() ? 0.f : 24.f * ScaleValue) + 4.f * ScaleValue;
+	}
+
+	float MenuItemTop(const UiNode& Item, int Index, float ScaleValue, float ItemsTop)
+	{
+		float Top = ItemsTop;
+
+		for (int Current = 0; Current < Index; Current++)
+		{
+			Top += 20.f * ScaleValue;
+
+			if (MenuHasSeparator(Item, Current))
+				Top += 7.f * ScaleValue;
+		}
+
+		return Top;
+	}
+
+	// A check mark or icon reserves the left column; without either the label starts near the edge.
+	bool MenuHasDecoration(const UiNode& Item)
+	{
+		for (int Check : Item.MenuChecks)
+		{
+			if (Check)
+				return true;
+		}
+
+		for (UiIcon Icon : Item.MenuIcons)
+		{
+			if (Icon != UiIcon::None)
+				return true;
+		}
+
+		return false;
+	}
+
+	float MenuDecorationWidth(const UiNode& Item, float ScaleValue)
+	{
+		return MenuHasDecoration(Item) ? 18.f * ScaleValue : 0.f;
+	}
+
+	// One geometry for drawing, selection highlight and hit testing: every column is a whole number of
+	// monospace cells, so highlights land exactly on the glyphs they cover.
+	struct HexGeometry
+	{
+		float CharWidth = 0.f;
+		float AddressX = 0.f;
+		float ValuesX = 0.f;
+		float CellWidth = 0.f;
+		float DigitsWidth = 0.f;
+		float TextX = 0.f;
+		float Right = 0.f;
+		int Unit = 1;
+		int Columns = 16;
+		int Digits = 2;
+		int TextChars = 16;
+	};
+
+	int HexUnitBytes(const UiNode& Item)
+	{
+		return Item.HexUnit >= 8 ? 8 : Item.HexUnit >= 4 ? 4 : Item.HexUnit >= 2 ? 2 : 1;
+	}
+
+	int HexCellDigits(const UiNode& Item)
+	{
+		const int Unit = HexUnitBytes(Item);
+
+		if (Item.HexKind != 1)
+			return Unit * 2;
+
+		// Widest decimal rendering per size: "255"/"-128", "65535"/"-32768", 10/11 and 20/20 digits.
+		switch (Unit)
+		{
+		case 1:
+			return Item.HexSigned ? 4 : 3;
+		case 2:
+			return Item.HexSigned ? 6 : 5;
+		case 4:
+			return Item.HexSigned ? 11 : 10;
+		default:
+			return 20;
+		}
+	}
+
+	float HexMeasureCharWidth(const UiNode& Item)
+	{
+		const font_id Previous = renderer::font();
+		const bool Overridden = !Item.FontName.empty() && renderer::select_font(Item.FontName.c_str());
+		// Ink extents stop short of the last advance; the trailing sentinel makes this the true 10-glyph pen advance.
+		const float Width = (renderer::measure_text(L"0000000000|", Item.Style.FontSize).width() -
+			renderer::measure_text(L"|", Item.Style.FontSize).width()) / 10.f;
+
+		if (Overridden)
+			renderer::set_font(Previous);
+
+		return Width > 0.f ? Width : Item.Style.FontSize * 0.55f;
+	}
+
+	HexGeometry HexLayout(const UiNode& Item, float Left, float ScaleValue)
+	{
+		HexGeometry Result;
+		Result.CharWidth = (Item.HexCharWidth > 0.f ? Item.HexCharWidth : Item.Style.FontSize * 0.55f) * ScaleValue;
+		Result.Unit = HexUnitBytes(Item);
+		Result.Columns = 16 / Result.Unit;
+		Result.Digits = HexCellDigits(Item);
+		Result.TextChars = Item.HexUtf16 ? 8 : 16;
+
+		const int AddressChars = Item.HexAddressChars > 0 ? Item.HexAddressChars : 8;
+		Result.AddressX = Left + 6.f * ScaleValue;
+		Result.ValuesX = Result.AddressX + static_cast<float>(AddressChars + 2) * Result.CharWidth;
+		Result.DigitsWidth = static_cast<float>(Result.Digits) * Result.CharWidth;
+		Result.CellWidth = static_cast<float>(Result.Digits + 1) * Result.CharWidth;
+		Result.TextX = Result.ValuesX + static_cast<float>(Result.Columns) * Result.CellWidth + Result.CharWidth;
+		Result.Right = Result.TextX + static_cast<float>(Result.TextChars) * Result.CharWidth;
+		return Result;
+	}
+
+	uint64_t HexRowCount(const UiNode& Item)
+	{
+		return (Item.HexSpan + 15) / 16;
+	}
+
+	// The dump scrolls in whole rows: glyphs are not clipped by the node, so a half-scrolled top row would
+	// spill over the content above it. Rounding up keeps the last row reachable at ScrollMax.
+	uint64_t HexFirstRow(const UiNode& Item, float RowPx)
+	{
+		if (RowPx <= 0.f || Item.Scroll <= 0.f)
+			return 0;
+
+		return static_cast<uint64_t>(std::ceil(Item.Scroll / RowPx - 0.01f));
+	}
+
+	// One value cell as text: little-endian hex digits, or decimal right-aligned to Digits when Pad.
+	std::wstring HexFormatCell(const UiNode& Item, uint64_t Raw, int Unit, int Digits, bool Pad)
+	{
+		wchar_t Cell[32];
+		const int Width = Pad ? Digits : 0;
+
+		if (Item.HexKind != 1)
+		{
+			swprintf_s(Cell, L"%0*llX", Unit * 2, static_cast<unsigned long long>(Raw));
+		}
+		else if (Item.HexSigned)
+		{
+			const int Bits = Unit * 8;
+			const int64_t Number = Bits < 64 && (Raw & (1ull << (Bits - 1))) != 0
+				? static_cast<int64_t>(Raw | (~0ull << Bits)) : static_cast<int64_t>(Raw);
+			swprintf_s(Cell, L"%*lld", Width, static_cast<long long>(Number));
+		}
+		else
+		{
+			swprintf_s(Cell, L"%*llu", Width, static_cast<unsigned long long>(Raw));
+		}
+
+		return Cell;
+	}
+
+	// Text-column glyph for one decoded unit. Only printable ASCII (and Latin-1 for UTF-16) is shown so
+	// every character keeps the monospace grid.
+	wchar_t HexTextChar(unsigned Value, bool Utf16)
+	{
+		if (Value >= 0x20 && Value < 0x7F)
+			return static_cast<wchar_t>(Value);
+
+		if (Utf16 && Value >= 0xA0 && Value <= 0xFF)
+			return static_cast<wchar_t>(Value);
+
+		return L'.';
+	}
+
+	// Moves the inline edit by whole cells (values) or characters (text); pending digits are dropped.
+	bool HexMoveEdit(UiNode& Item, int64_t Steps)
+	{
+		const int64_t Width = Item.HexEditColumn == 1 ? HexUnitBytes(Item) : Item.HexUtf16 ? 2 : 1;
+		const int64_t Target = static_cast<int64_t>(Item.HexEditAddress) + Steps * Width;
+
+		if (Target < 0 || static_cast<uint64_t>(Target) >= Item.HexSpan)
+			return false;
+
+		Item.HexEditAddress = static_cast<uint64_t>(Target);
+		Item.HexEditText.clear();
+		Item.HexSelAnchor = Item.HexEditAddress;
+		Item.HexSelStart = Item.HexEditAddress;
+		Item.HexSelEnd = std::min(Item.HexEditAddress + static_cast<uint64_t>(Width), Item.HexSpan);
+		Item.HexHasSelection = true;
+		return true;
+	}
+
+	// Scrolls whole rows so the cell being edited stays inside the visible part of the dump.
+	void HexReveal(UiNode& Item, float ScaleValue)
+	{
+		const float RowPx = Item.RowHeight * ScaleValue;
+
+		if (RowPx <= 0.f)
+			return;
+
+		const uint64_t Row = Item.HexEditAddress / 16;
+		const uint64_t First = HexFirstRow(Item, RowPx);
+		const uint64_t Visible = std::max<uint64_t>(1, static_cast<uint64_t>(Item.Bounds.height() / RowPx));
+
+		if (Row < First)
+			Item.Scroll = static_cast<float>(Row) * RowPx;
+		else if (Row >= First + Visible)
+			Item.Scroll = static_cast<float>(Row - Visible + 1) * RowPx;
+	}
+
+	void DrawDashedRect(rect Bounds, float Scale, color Tint)
+	{
+		// A hairline of short, translucent dashes: the outline marks an editable cell without competing
+		// with the text inside it.
+		const float Hair = std::max(1.f, std::round(Scale * 0.5f));
+		const float Dash = 3.f * Scale;
+		const float Gap = 2.f * Scale;
+		const color Stroke = WithAlpha(Tint, 0.5f);
+
+		for (float X = Bounds.left; X < Bounds.right; X += Dash + Gap)
+		{
+			const float Right = std::min(Bounds.right, X + Dash);
+			renderer::draw_filled_rect(rect(X, Bounds.top, Right, Bounds.top + Hair), Stroke);
+			renderer::draw_filled_rect(rect(X, Bounds.bottom - Hair, Right, Bounds.bottom), Stroke);
+		}
+
+		for (float Y = Bounds.top; Y < Bounds.bottom; Y += Dash + Gap)
+		{
+			const float Bottom = std::min(Bounds.bottom, Y + Dash);
+			renderer::draw_filled_rect(rect(Bounds.left, Y, Bounds.left + Hair, Bottom), Stroke);
+			renderer::draw_filled_rect(rect(Bounds.right - Hair, Y, Bounds.right, Bottom), Stroke);
+		}
 	}
 
 	float IndicatorWidth(UiNodeKind Kind)
@@ -551,14 +830,676 @@ int PanelContent::ListBox(int Parent, const std::vector<std::wstring>& Items, in
 	return Id;
 }
 
+int PanelContent::TableList(int Parent, std::vector<std::wstring> Headers, std::vector<std::vector<std::wstring>> Rows,
+	std::vector<float> Widths, float ViewHeight, float RowHeightIn)
+{
+	UiStyle Style;
+	Style.Width = UiSize::Fixed;
+	// A non-positive height fills the remaining space, so the table can be the panel's whole content.
+	Style.Height = ViewHeight > 0.f ? UiSize::Fixed : UiSize::Fill;
+	Style.HeightValue = ViewHeight;
+	Style.FontSize = 12.f;
+	Style.Scroll = true;
+	Style.Align = UiAlign::Start;
+
+	float Total = 0.f;
+	for (float Width : Widths)
+		Total += Width;
+
+	Style.WidthValue = Total;
+
+	const int Id = Add(UiNodeKind::TableList, Parent, Style, L"");
+	UiNode& Item = Nodes[Id];
+	Item.Columns = std::move(Headers);
+	Item.Rows = std::move(Rows);
+	Item.ColumnWidths = std::move(Widths);
+	Item.RowHeight = RowHeightIn;
+	return Id;
+}
+
+int PanelContent::HexView(int Parent, const uint8_t* Data, size_t Size, bool ByRva, uint64_t SnapOffset, float ViewHeight, int UnitBytes, int Kind)
+{
+	UiStyle Style;
+	// Width follows the column geometry; a non-positive height fills the remaining panel space.
+	Style.Width = UiSize::Auto;
+	Style.Height = ViewHeight > 0.f ? UiSize::Fixed : UiSize::Fill;
+	Style.HeightValue = ViewHeight;
+	Style.FontSize = 10.f;
+	Style.Scroll = true;
+	Style.Align = UiAlign::Start;
+
+	const int Id = Add(UiNodeKind::HexView, Parent, Style, L"");
+	UiNode& Item = Nodes[Id];
+	Item.HexData = Data;
+	Item.HexSize = Size;
+	Item.HexSpan = Size;
+	Item.HexByRva = ByRva;
+	Item.HexUnit = UnitBytes;
+	Item.HexUnit = HexUnitBytes(Item);
+	Item.HexKind = Kind == 1 ? 1 : 0;
+	Item.RowHeight = 14.f;
+	Item.HexSnapRow = static_cast<int>(SnapOffset / 16);
+	return Id;
+}
+
+int PanelContent::TableListRowAt(const UiNode& Item, vec2 Point) const
+{
+	if (Item.Kind != UiNodeKind::TableList || Item.RowHeight <= 0.f)
+		return -1;
+
+	const float Header = TableHeader * Scale;
+	const float RowPx = Item.RowHeight * Scale;
+
+	if (Point.x < Item.Bounds.left || Point.x >= Item.Bounds.right ||
+		Point.y < Item.Bounds.top + Header || Point.y >= Item.Bounds.bottom)
+		return -1;
+
+	const float Local = Point.y - (Item.Bounds.top + Header) + Item.Scroll;
+	const int Row = static_cast<int>(std::floor(Local / RowPx));
+
+	return Row >= 0 && Row < static_cast<int>(Item.Rows.size()) ? Row : -1;
+}
+
+int PanelContent::TableListColumnAt(const UiNode& Item, vec2 Point) const
+{
+	if (Item.Kind != UiNodeKind::TableList || Point.x < Item.Bounds.left || Point.x >= Item.Bounds.right)
+		return -1;
+
+	const std::vector<float> Widths = TableWidths(Item);
+	float X = Item.Bounds.left;
+
+	for (size_t Column = 0; Column < Widths.size(); Column++)
+	{
+		X += Widths[Column] * Scale;
+
+		if (Point.x < X)
+			return static_cast<int>(Column);
+	}
+
+	return -1;
+}
+
+std::vector<float> PanelContent::TableWidths(const UiNode& Item) const
+{
+	std::vector<float> Widths = Item.ColumnWidths;
+
+	if (Widths.empty() || Scale <= 0.f)
+		return Widths;
+
+	float Total = 0.f;
+
+	for (float Width : Widths)
+		Total += Width * Scale;
+
+	const float Extra = Item.Bounds.width() - Total;
+
+	if (Extra > 0.5f)
+	{
+		Widths.back() += Extra / Scale;
+	}
+	else if (Extra < -0.5f && Total > 0.f)
+	{
+		// Narrower than its columns: share the width so every column stays visible and text is clipped by
+		// its cell instead of the last columns falling off the panel.
+		const float Factor = Item.Bounds.width() / Total;
+
+		for (float& Width : Widths)
+			Width = std::max(24.f, Width * Factor);
+	}
+
+	return Widths;
+}
+
+bool PanelContent::HexHit(const UiNode& Item, vec2 Point, int& Column, uint64_t& Address, uint64_t& Width, int ForceColumn) const
+{
+	if (Item.Kind != UiNodeKind::HexView || Item.RowHeight <= 0.f)
+		return false;
+
+	const float RowPx = Item.RowHeight * Scale;
+	const float RowLimit = Item.Bounds.top + std::floor(Item.Bounds.height() / RowPx) * RowPx;
+	const HexGeometry Layout = HexLayout(Item, Item.Bounds.left, Scale);
+	const float Half = Layout.CharWidth * 0.5f;
+	const float ValuesLeft = Layout.ValuesX - Half;
+	const float TextLeft = Layout.TextX - Half;
+
+	if (RowLimit <= Item.Bounds.top)
+		return false;
+
+	if (ForceColumn >= 0)
+	{
+		// Drags keep extending the selection in the column where they started, even past its edges.
+		Point.y = std::clamp(Point.y, Item.Bounds.top, RowLimit - 1.f);
+
+		if (ForceColumn == 0)
+			Point.x = std::clamp(Point.x, Item.Bounds.left, ValuesLeft - 1.f);
+		else if (ForceColumn == 1)
+			Point.x = std::clamp(Point.x, ValuesLeft, TextLeft - 1.f);
+		else
+			Point.x = std::clamp(Point.x, TextLeft, Layout.Right - 1.f);
+	}
+
+	if (Point.x < Item.Bounds.left || Point.x >= Item.Bounds.right || Point.y < Item.Bounds.top || Point.y >= RowLimit)
+		return false;
+
+	const uint64_t Row = HexFirstRow(Item, RowPx) + static_cast<uint64_t>((Point.y - Item.Bounds.top) / RowPx);
+
+	if (Row >= HexRowCount(Item))
+		return false;
+
+	uint64_t Offset = 0;
+
+	if (Point.x < ValuesLeft)
+	{
+		// The address column selects whole rows.
+		Column = 0;
+		Width = 16;
+	}
+	else if (Point.x < TextLeft)
+	{
+		// Value cells select whole units, matching how the value is rendered.
+		const int Cell = std::clamp(static_cast<int>((Point.x - Layout.ValuesX + Half) / Layout.CellWidth), 0, Layout.Columns - 1);
+		Column = 1;
+		Offset = static_cast<uint64_t>(Cell) * static_cast<uint64_t>(Layout.Unit);
+		Width = static_cast<uint64_t>(Layout.Unit);
+	}
+	else if (Point.x < Layout.Right)
+	{
+		const int Stride = Item.HexUtf16 ? 2 : 1;
+		const int Char = std::clamp(static_cast<int>((Point.x - Layout.TextX) / Layout.CharWidth), 0, Layout.TextChars - 1);
+		Column = 2;
+		Offset = static_cast<uint64_t>(Char) * static_cast<uint64_t>(Stride);
+		Width = static_cast<uint64_t>(Stride);
+	}
+	else
+	{
+		return false;
+	}
+
+	const uint64_t Result = Row * 16 + Offset;
+
+	if (Result >= Item.HexSpan)
+		return false;
+
+	Address = Result;
+	return true;
+}
+
+bool PanelContent::HexReadByte(const UiNode& Item, uint64_t Address, uint8_t& Value) const
+{
+	uint64_t FileOffset = Address;
+
+	if (!Item.HexData || Address >= Item.HexSpan)
+		return false;
+
+	if (Item.HexResolve && !Item.HexResolve(Address, FileOffset))
+		return false;
+
+	if (FileOffset >= Item.HexSize)
+		return false;
+
+	Value = Item.HexData[FileOffset];
+	return true;
+}
+
+void PanelContent::HexBeginEdit(UiNode& Item, int Column, uint64_t Address)
+{
+	const uint64_t Width = Column == 1 ? static_cast<uint64_t>(HexUnitBytes(Item)) : Item.HexUtf16 ? 2 : 1;
+	const uint64_t Start = Address - Address % Width;
+
+	if (!Item.HexWrite || Column == 0 || Start >= Item.HexSpan)
+		return;
+
+	Item.HexEditing = true;
+	Item.HexEditColumn = Column;
+	Item.HexEditAddress = Start;
+	Item.HexEditText.clear();
+	Item.HexSelColumn = Column;
+	Item.HexSelAnchor = Start;
+	Item.HexSelStart = Start;
+	Item.HexSelEnd = std::min(Start + Width, Item.HexSpan);
+	Item.HexHasSelection = true;
+}
+
+bool PanelContent::HexCommitEdit(UiNode& Item)
+{
+	if (!Item.HexEditing || Item.HexEditColumn != 1 || Item.HexEditText.empty() || !Item.HexWrite)
+		return false;
+
+	const int Unit = HexUnitBytes(Item);
+	const int Bits = Unit * 8;
+	const uint64_t Mask = Bits >= 64 ? ~0ull : (1ull << Bits) - 1;
+	const wchar_t* Begin = Item.HexEditText.c_str();
+	wchar_t* End = nullptr;
+	uint64_t Raw = 0;
+	errno = 0;
+
+	if (Item.HexKind != 1)
+	{
+		Raw = wcstoull(Begin, &End, 16);
+	}
+	else if (Item.HexSigned)
+	{
+		const long long Number = wcstoll(Begin, &End, 10);
+		const long long Low = Bits >= 64 ? LLONG_MIN : -(1ll << (Bits - 1));
+		const long long High = Bits >= 64 ? LLONG_MAX : (1ll << (Bits - 1)) - 1;
+
+		if (Number < Low || Number > High)
+			return false;
+
+		Raw = static_cast<uint64_t>(Number) & Mask;
+	}
+	else
+	{
+		Raw = wcstoull(Begin, &End, 10);
+
+		if (Raw > Mask)
+			return false;
+	}
+
+	if (errno == ERANGE || End == Begin || (End && *End))
+		return false;
+
+	std::vector<uint8_t> Bytes(static_cast<size_t>(Unit));
+
+	for (int Part = 0; Part < Unit; Part++)
+		Bytes[static_cast<size_t>(Part)] = static_cast<uint8_t>(Raw >> (8 * Part));
+
+	Item.HexEditText.clear();
+	std::function<void(uint64_t, const std::vector<uint8_t>&)> Write = Item.HexWrite;
+	Write(Item.HexEditAddress, Bytes);
+	return true;
+}
+
+void PanelContent::HexEndEdit(UiNode& Item, bool Commit)
+{
+	if (Commit)
+		HexCommitEdit(Item);
+
+	Item.HexEditing = false;
+	Item.HexEditText.clear();
+}
+
+std::wstring PanelContent::HexRowValues(const UiNode& Item, uint64_t RowAddress) const
+{
+	const int Unit = HexUnitBytes(Item);
+	const int Digits = HexCellDigits(Item);
+	std::wstring Values;
+
+	for (int Column = 0; Column < 16 / Unit; Column++)
+	{
+		uint64_t Raw = 0;
+		bool Complete = true;
+
+		for (int Part = 0; Part < Unit; Part++)
+		{
+			uint8_t Value = 0;
+			Complete = HexReadByte(Item, RowAddress + static_cast<uint64_t>(Column * Unit + Part), Value) && Complete;
+			Raw |= static_cast<uint64_t>(Value) << (8 * Part);
+		}
+
+		if (!Values.empty())
+			Values += L' ';
+
+		if (Complete)
+			Values += HexFormatCell(Item, Raw, Unit, Digits, true);
+		else
+			Values.append(Item.HexKind == 1 ? 1 : static_cast<size_t>(Digits), L'?');
+	}
+
+	return Values;
+}
+
+std::wstring PanelContent::HexRowText(const UiNode& Item, uint64_t RowAddress) const
+{
+	const uint64_t Stride = Item.HexUtf16 ? 2 : 1;
+	const int Chars = Item.HexUtf16 ? 8 : 16;
+	std::wstring Text;
+
+	for (int Char = 0; Char < Chars; Char++)
+	{
+		uint8_t Low = 0;
+		uint8_t High = 0;
+		const bool Present = HexReadByte(Item, RowAddress + static_cast<uint64_t>(Char) * Stride, Low) &&
+			(Stride == 1 || HexReadByte(Item, RowAddress + static_cast<uint64_t>(Char) * Stride + 1, High));
+		Text += Present ? HexTextChar(static_cast<unsigned>(Low) | (static_cast<unsigned>(High) << 8), Item.HexUtf16) : L'?';
+	}
+
+	return Text;
+}
+
+std::wstring PanelContent::HexAddressLabel(const UiNode& Item, uint64_t Address) const
+{
+	std::wstring Label;
+
+	if (Item.HexAddressText)
+	{
+		Label = Item.HexAddressText(Address);
+	}
+	else
+	{
+		wchar_t Buffer[24];
+		swprintf_s(Buffer, L"%08llX", static_cast<unsigned long long>(Address));
+		Label = Buffer;
+	}
+
+	// The column pads the section name so every digit lines up; a copied label keeps a single separator.
+	std::wstring Clean;
+	Clean.reserve(Label.size());
+	bool Space = false;
+
+	for (wchar_t Char : Label)
+	{
+		if (Char == L' ')
+		{
+			Space = true;
+			continue;
+		}
+
+		if (Space && !Clean.empty())
+			Clean += L' ';
+
+		Space = false;
+		Clean += Char;
+	}
+
+	return Clean;
+}
+
+void PanelContent::HexCopySelection(int Node, HexCopy Mode) const
+{
+	if (!Valid(Node))
+		return;
+
+	const UiNode& Dump = Nodes[Node];
+
+	if (Dump.Kind != UiNodeKind::HexView || !Dump.HexHasSelection || Dump.HexSelEnd <= Dump.HexSelStart)
+		return;
+
+	if (Mode == HexCopy::Column)
+		Mode = Dump.HexSelColumn == 0 ? HexCopy::Address : Dump.HexSelColumn == 1 ? HexCopy::Values : HexCopy::Text;
+
+	std::wstring Text;
+
+	if (Mode == HexCopy::Address)
+	{
+		for (uint64_t Row = Dump.HexSelStart / 16; Row <= (Dump.HexSelEnd - 1) / 16; Row++)
+		{
+			if (!Text.empty())
+				Text += L"\r\n";
+
+			Text += HexAddressLabel(Dump, Row * 16);
+		}
+	}
+	else if (Mode == HexCopy::Values)
+	{
+		// Values as displayed, one space between cells; the selection is widened to whole units.
+		const int Unit = HexUnitBytes(Dump);
+
+		for (uint64_t Address = Dump.HexSelStart - Dump.HexSelStart % Unit; Address < Dump.HexSelEnd; Address += Unit)
+		{
+			uint64_t Raw = 0;
+			bool Complete = true;
+
+			for (int Part = 0; Part < Unit; Part++)
+			{
+				uint8_t Value = 0;
+				Complete = HexReadByte(Dump, Address + static_cast<uint64_t>(Part), Value) && Complete;
+				Raw |= static_cast<uint64_t>(Value) << (8 * Part);
+			}
+
+			if (!Text.empty())
+				Text += L' ';
+
+			if (Complete)
+				Text += HexFormatCell(Dump, Raw, Unit, 0, false);
+			else
+				Text.append(Dump.HexKind == 1 ? 1 : static_cast<size_t>(Unit * 2), L'?');
+		}
+	}
+	else if (Mode == HexCopy::Text)
+	{
+		const uint64_t Stride = Dump.HexUtf16 ? 2 : 1;
+
+		for (uint64_t Address = Dump.HexSelStart - Dump.HexSelStart % Stride; Address < Dump.HexSelEnd; Address += Stride)
+		{
+			uint8_t Low = 0;
+			uint8_t High = 0;
+			const bool Present = HexReadByte(Dump, Address, Low) && (Stride == 1 || HexReadByte(Dump, Address + 1, High));
+			Text += Present ? HexTextChar(static_cast<unsigned>(Low) | (static_cast<unsigned>(High) << 8), Dump.HexUtf16) : L'?';
+		}
+	}
+	else
+	{
+		// One full line per selected row: address, spacing, values, spacing, text.
+		for (uint64_t Row = Dump.HexSelStart / 16; Row <= (Dump.HexSelEnd - 1) / 16; Row++)
+		{
+			if (!Text.empty())
+				Text += L"\r\n";
+
+			Text += HexAddressLabel(Dump, Row * 16) + L"  " + HexRowValues(Dump, Row * 16) + L"  " + HexRowText(Dump, Row * 16);
+		}
+	}
+
+	if (!Text.empty())
+		CopyTextToClipboard(Text);
+}
+
+bool PanelContent::BeginCellEdit(int Node, int Row, int Column)
+{
+	if (!Valid(Node))
+		return false;
+
+	UiNode& Item = Nodes[Node];
+
+	if (Item.Kind != UiNodeKind::TableList || Row < 0 || Row >= static_cast<int>(Item.Rows.size()) || Column < 0 ||
+		Column >= static_cast<int>(Item.Rows[static_cast<size_t>(Row)].size()) || !Item.CanEdit || !Item.CanEdit(Row, Column))
+		return false;
+
+	CloseMenus();
+	ClearFocus();
+	Focused = Node;
+	Item.SelectedRow = Row;
+	Item.SelectedColumn = Column;
+	Item.EditRow = Row;
+	Item.EditColumn = Column;
+	Item.EditText = Item.Rows[static_cast<size_t>(Row)][static_cast<size_t>(Column)];
+	Item.EditCaret = static_cast<int>(Item.EditText.size());
+	return true;
+}
+
+void PanelContent::CommitTableEdit(int Node)
+{
+	if (!Valid(Node))
+		return;
+
+	UiNode& Item = Nodes[Node];
+
+	if (Item.Kind != UiNodeKind::TableList || Item.EditRow < 0 || Item.EditRow >= static_cast<int>(Item.Rows.size()) ||
+		Item.EditColumn < 0 || Item.EditColumn >= static_cast<int>(Item.Rows[static_cast<size_t>(Item.EditRow)].size()))
+	{
+		Item.EditRow = -1;
+		return;
+	}
+
+	const int Row = Item.EditRow;
+	const int Column = Item.EditColumn;
+	const std::wstring Value = Item.EditText;
+	Item.Rows[static_cast<size_t>(Row)][static_cast<size_t>(Column)] = Value;
+	Item.EditRow = -1;
+	Item.EditColumn = -1;
+	Item.EditCaret = 0;
+
+	std::function<void(int, int, const std::wstring&)> Callback = Item.OnCellEdit;
+
+	if (Focused == Node)
+		ClearFocus();
+
+	if (Callback)
+		Callback(Row, Column, Value);
+}
+
+void PanelContent::CancelTableEdit(int Node)
+{
+	if (!Valid(Node))
+		return;
+
+	if (Nodes[Node].Kind == UiNodeKind::TableList)
+	{
+		Nodes[Node].EditRow = -1;
+		Nodes[Node].EditColumn = -1;
+	}
+
+	if (Focused == Node)
+		ClearFocus();
+}
+
+int PanelContent::OpenMenuNode() const
+{
+	for (int Node = 0; Node < static_cast<int>(Nodes.size()); Node++)
+	{
+		if (Nodes[Node].MenuOpen && !Nodes[Node].MenuItems.empty())
+			return Node;
+	}
+
+	return -1;
+}
+
+void PanelContent::CloseMenus()
+{
+	for (UiNode& Item : Nodes)
+	{
+		Item.MenuOpen = false;
+		Item.MenuHover = -1;
+	}
+}
+
+void PanelContent::AdoptViewState(const PanelContent& Previous)
+{
+	const size_t Count = std::min(Nodes.size(), Previous.Nodes.size());
+
+	for (size_t Index = 0; Index < Count; Index++)
+	{
+		UiNode& Item = Nodes[Index];
+		const UiNode& Old = Previous.Nodes[Index];
+
+		// A hex dump rebuilt by a refresh is a navigation (new snap target), so it keeps its own view.
+		if (Item.Kind != Old.Kind || Item.Kind == UiNodeKind::HexView)
+			continue;
+
+		Item.Scroll = Old.Scroll;
+		Item.ScrollX = Old.ScrollX;
+
+		if (Item.Kind == UiNodeKind::Collapsible && Item.Text == Old.Text)
+			Item.Checked = Old.Checked;
+
+		if (Item.Kind == UiNodeKind::TableList && Old.SelectedRow < static_cast<int>(Item.Rows.size()))
+		{
+			Item.SelectedRow = Old.SelectedRow;
+			Item.SelectedColumn = Old.SelectedColumn;
+		}
+	}
+}
+
+void PanelContent::OpenMenu(int Node, vec2 Point)
+{
+	CloseMenus();
+
+	UiNode& Item = Nodes[Node];
+	Item.MenuOpen = true;
+	Item.MenuPoint = Point;
+	Item.MenuHover = -1;
+
+	// The owner fills the items for the clicked target; an empty list means no menu.
+	std::function<void()> Fill = Item.OnMenuOpen;
+
+	if (Fill)
+		Fill();
+
+	if (Nodes[Node].MenuItems.empty())
+		Nodes[Node].MenuOpen = false;
+}
+
+bool PanelContent::OnRightMouseDown(vec2 Point)
+{
+	// Right-click in the dump opens the context menu at the pointer. A press outside the current selection
+	// first selects the byte under it, so menu actions always apply to what is highlighted.
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		UiNode& Item = Nodes[Index];
+
+		if (Item.Kind != UiNodeKind::HexView || !Item.Visible || !PointInRect(Item.Bounds, Point) || !PointVisible(Index, Point))
+			continue;
+
+		if (Item.HexEditing)
+			HexEndEdit(Item, true);
+
+		int Column = 1;
+		uint64_t Address = 0;
+		uint64_t Width = 1;
+		Item.HexMenuOnByte = HexHit(Item, Point, Column, Address, Width);
+		Item.HexMenuAddress = Address;
+
+		if (Item.HexMenuOnByte)
+		{
+			const bool Inside = Item.HexHasSelection && Column == Item.HexSelColumn &&
+				Address >= Item.HexSelStart && Address < Item.HexSelEnd;
+
+			if (!Inside)
+			{
+				Item.HexSelColumn = Column;
+				Item.HexSelAnchor = Address;
+				Item.HexSelStart = Address;
+				Item.HexSelEnd = std::min(Address + Width, Item.HexSpan);
+				Item.HexHasSelection = true;
+			}
+		}
+
+		ClearFocus();
+		Focused = Index;
+		OpenMenu(Index, Point);
+		return true;
+	}
+
+	// Tables: right-click selects the cell under the pointer and opens the owner's menu for it.
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		UiNode& Item = Nodes[Index];
+
+		if (Item.Kind != UiNodeKind::TableList || !Item.Visible)
+			continue;
+
+		const int Row = TableListRowAt(Item, Point);
+		const int Column = TableListColumnAt(Item, Point);
+
+		if (Row < 0 || Column < 0 || !PointVisible(Index, Point))
+			continue;
+
+		if (Item.EditRow >= 0)
+			CommitTableEdit(Index);
+
+		ClearFocus();
+		Focused = Index;
+		Nodes[Index].SelectedRow = Row;
+		Nodes[Index].SelectedColumn = Column;
+
+		if (!Nodes[Index].OnMenuOpen)
+			return true;
+
+		OpenMenu(Index, Point);
+		return true;
+	}
+
+	return false;
+}
+
 int PanelContent::Collapsible(int Parent, const std::wstring& Title, bool Expanded, float Padding, float Gap)
 {
+	// No card: a collapsible is a section of the panel, so it inherits the panel surface and only its
+	// header row reacts to the pointer. Content keeps the panel's own indent.
 	UiStyle Style;
 	Style.Flow = UiFlow::Vertical;
 	Style.Padding = Padding;
 	Style.Gap = Gap;
-	Style.Radius = 6.f;
-	Style.Border = UiPaint::RolePaint(UiColorRole::Border);
 	const int Id = Add(UiNodeKind::Collapsible, Parent, Style, Title);
 	Nodes[Id].Checked = Expanded;
 	return Id;
@@ -578,6 +1519,28 @@ int PanelContent::Spacer(int Parent, float Size, float Grow)
 	Style.HeightValue = Size;
 	Style.Grow = Grow;
 	return Add(UiNodeKind::Spacer, Parent, Style, L"");
+}
+
+int PanelContent::DragHandle(int Parent, bool Vertical, float Thickness)
+{
+	UiStyle Style;
+
+	if (Vertical)
+	{
+		Style.Width = UiSize::Fixed;
+		Style.WidthValue = Thickness;
+		Style.Height = UiSize::Fill;
+	}
+	else
+	{
+		Style.Width = UiSize::Fill;
+		Style.Height = UiSize::Fixed;
+		Style.HeightValue = Thickness;
+	}
+
+	const int Id = Add(UiNodeKind::DragHandle, Parent, Style, L"");
+	Nodes[Id].ResizeVertical = Vertical;
+	return Id;
 }
 
 bool PanelContent::InSubtree(int Node, int Ancestor) const
@@ -648,6 +1611,11 @@ void PanelContent::SetValue(int Node, double Value)
 {
 	if (Valid(Node))
 		Nodes[Node].Value = SnapValue(Nodes[Node], Value);
+}
+
+void PanelContent::SetTextAlpha(float Alpha)
+{
+	TextAlpha = std::clamp(Alpha, 0.f, 1.f);
 }
 
 void PanelContent::Layout(rect Area, float ScaleValue)
@@ -790,9 +1758,10 @@ void PanelContent::LayoutNode(int Node, rect Bounds)
 
 	const float Pad = Item.Style.Padding * Scale;
 	const float Header = Item.Kind == UiNodeKind::Collapsible ? CollapsibleHeader * Scale : 0.f;
+	const float Indent = Item.Kind == UiNodeKind::Collapsible ? CollapsibleIndent * Scale : 0.f;
 	const float InnerTop = Bounds.top + Header + Pad;
-	Item.Inner = rect(Bounds.left + Pad, InnerTop,
-		std::max(Bounds.left + Pad, Bounds.right - Pad), std::max(InnerTop, Bounds.bottom - Pad));
+	Item.Inner = rect(Bounds.left + Pad + Indent, InnerTop,
+		std::max(Bounds.left + Pad + Indent, Bounds.right - Pad), std::max(InnerTop, Bounds.bottom - Pad));
 
 	switch (Item.Kind)
 	{
@@ -807,9 +1776,40 @@ void PanelContent::LayoutNode(int Node, rect Bounds)
 		Item.Scroll = std::clamp(Item.Scroll, 0.f, Item.ScrollMax);
 		return;
 	}
+	case UiNodeKind::TableList:
+	{
+		const float HeaderPx = TableHeader * Scale;
+		const float Body = std::max(0.f, Bounds.height() - HeaderPx);
+		const float Content = static_cast<float>(Item.Rows.size()) * Item.RowHeight * Scale;
+		Item.ScrollMax = std::max(0.f, Content - Body);
+		Item.Scroll = std::clamp(Item.Scroll, 0.f, Item.ScrollMax);
+		return;
+	}
+	case UiNodeKind::HexView:
+	{
+		const float RowPx = Item.RowHeight * Scale;
+		Item.HexCharWidth = HexMeasureCharWidth(Item);
+		const float Content = static_cast<float>(HexRowCount(Item)) * RowPx;
+		Item.ScrollMax = std::max(0.f, Content - Bounds.height());
+
+		if (Item.HexSnapRow >= 0)
+		{
+			Item.Scroll = std::clamp(static_cast<float>(Item.HexSnapRow) * RowPx, 0.f, Item.ScrollMax);
+			Item.HexSnapRow = -1;
+		}
+		else
+		{
+			Item.Scroll = std::clamp(Item.Scroll, 0.f, Item.ScrollMax);
+		}
+
+		return;
+	}
 	case UiNodeKind::Collapsible:
 		if (!Item.Checked)
 		{
+			Item.ScrollMax = 0.f;
+			Item.ScrollMaxX = 0.f;
+
 			for (int Child : Item.Children)
 				HideSubtree(Child);
 
@@ -889,6 +1889,7 @@ void PanelContent::LayoutFlow(int Node, bool Vertical)
 	{
 		int Node = -1;
 		float Main = 0.f;
+		float Cross = 0.f;
 		float Margin = 0.f;
 		float Weight = 0.f;
 		bool Fill = false;
@@ -944,6 +1945,36 @@ void PanelContent::LayoutFlow(int Node, bool Vertical)
 
 	const float Remaining = std::max(0.f, Available - FixedTotal - GapTotal);
 
+	for (FlowItem& Flow : Items)
+	{
+		const UiNode& Item = Nodes[Flow.Node];
+		const float Main = Flow.Fill && FillWeight > 0.f ? Remaining * Flow.Weight / FillWeight : Flow.Main;
+		const float CrossSpace = std::max(0.f, (Vertical ? Parent.Inner.width() : Parent.Inner.height()) - Flow.Margin * 2.f);
+		const UiSize CrossMode = Vertical ? Item.Style.Width : Item.Style.Height;
+		const float CrossValue = Vertical ? Item.Style.WidthValue : Item.Style.HeightValue;
+
+		switch (CrossMode)
+		{
+		case UiSize::Fixed:
+			Flow.Cross = CrossValue * Scale;
+			break;
+		case UiSize::Percent:
+			Flow.Cross = (Vertical ? Parent.Inner.width() : Parent.Inner.height()) * CrossValue / 100.f;
+			break;
+		case UiSize::Fill:
+			Flow.Cross = CrossSpace;
+			break;
+		default:
+			Flow.Cross = Vertical ? MeasureWidth(Flow.Node, Main) : MeasureHeight(Flow.Node, Main);
+			if (Vertical && Flow.Cross <= 0.f)
+				Flow.Cross = CrossSpace;
+			break;
+		}
+
+		if (Item.Style.Align == UiAlign::Stretch)
+			Flow.Cross = CrossSpace;
+	}
+
 	if (Parent.Style.Scroll && Vertical)
 	{
 		const float TotalContent = FixedTotal + GapTotal + Pad * 2.f;
@@ -955,43 +1986,45 @@ void PanelContent::LayoutFlow(int Node, bool Vertical)
 		Parent.ScrollMax = 0.f;
 	}
 
+	if (Parent.Style.ScrollX)
+	{
+		// Horizontal flow scrolls on the main axis; a vertical flow scrolls on the widest child.
+		float ContentWidth = FixedTotal + GapTotal + Pad * 2.f;
+
+		if (Vertical)
+		{
+			float MaxCross = 0.f;
+			for (const FlowItem& Flow : Items)
+				MaxCross = std::max(MaxCross, Flow.Cross + Flow.Margin * 2.f);
+
+			ContentWidth = MaxCross + Pad * 2.f;
+		}
+
+		Parent.ScrollMaxX = std::max(0.f, ContentWidth - Parent.Bounds.width());
+		Parent.ScrollX = std::clamp(Parent.ScrollX, 0.f, Parent.ScrollMaxX);
+	}
+	else
+	{
+		Parent.ScrollMaxX = 0.f;
+	}
+
 	float Cursor = Vertical ? Parent.Inner.top : Parent.Inner.left;
 
 	if (Parent.Style.Scroll && Vertical)
 		Cursor -= Parent.Scroll;
 
+	if (Parent.Style.ScrollX && !Vertical)
+		Cursor -= Parent.ScrollX;
+
 	for (const FlowItem& Flow : Items)
 	{
 		const UiNode& Item = Nodes[Flow.Node];
 		const float Main = Flow.Fill && FillWeight > 0.f ? Remaining * Flow.Weight / FillWeight : Flow.Main;
-		const float CrossSpace = std::max(0.f, (Vertical ? Parent.Inner.width() : Parent.Inner.height()) - Flow.Margin * 2.f);
-		const UiSize CrossMode = Vertical ? Item.Style.Width : Item.Style.Height;
-		const float CrossValue = Vertical ? Item.Style.WidthValue : Item.Style.HeightValue;
-		float Cross = 0.f;
+		const float Cross = Flow.Cross;
+		const float CrossShift = Vertical && Parent.Style.ScrollX ? Parent.ScrollX : 0.f;
 
-		switch (CrossMode)
-		{
-		case UiSize::Fixed:
-			Cross = CrossValue * Scale;
-			break;
-		case UiSize::Percent:
-			Cross = (Vertical ? Parent.Inner.width() : Parent.Inner.height()) * CrossValue / 100.f;
-			break;
-		case UiSize::Fill:
-			Cross = CrossSpace;
-			break;
-		default:
-			Cross = Vertical ? MeasureWidth(Flow.Node, Main) : MeasureHeight(Flow.Node, Main);
-			if (Vertical && Cross <= 0.f)
-				Cross = CrossSpace;
-			break;
-		}
-
-		if (Item.Style.Align == UiAlign::Stretch)
-			Cross = CrossSpace;
-
-		const float CrossStart = Vertical ? Parent.Inner.left : Parent.Inner.top;
-		const float CrossEnd = Vertical ? Parent.Inner.right : Parent.Inner.bottom;
+		const float CrossStart = (Vertical ? Parent.Inner.left : Parent.Inner.top) - CrossShift;
+		const float CrossEnd = (Vertical ? Parent.Inner.right : Parent.Inner.bottom) - CrossShift;
 		float Offset = CrossStart + Flow.Margin;
 
 		if (Item.Style.Align == UiAlign::Center)
@@ -1096,6 +2129,9 @@ float PanelContent::MeasureHeight(int Node, float Width)
 		return 140.f * Scale;
 	case UiNodeKind::Rect:
 	case UiNodeKind::Spacer:
+	case UiNodeKind::DragHandle:
+	case UiNodeKind::TableList:
+	case UiNodeKind::HexView:
 		return Flexible ? 0.f : Style.HeightValue * Scale;
 	case UiNodeKind::Collapsible:
 		if (Flexible)
@@ -1158,7 +2194,18 @@ float PanelContent::MeasureWidth(int Node, float Height)
 		return Item.Texture ? renderer::texture_size(Item.Texture).x * Scale : 64.f * Scale;
 	case UiNodeKind::Rect:
 	case UiNodeKind::Spacer:
+	case UiNodeKind::DragHandle:
+	case UiNodeKind::TableList:
 		return Flexible ? 0.f : Style.WidthValue * Scale;
+	case UiNodeKind::HexView:
+	{
+		if (Flexible)
+			return 0.f;
+
+		// Columns plus a lane for the vertical scrollbar so the bar never sits on the text column.
+		Nodes[Node].HexCharWidth = HexMeasureCharWidth(Item);
+		return HexLayout(Item, 0.f, Scale).Right + 18.f * Scale;
+	}
 	case UiNodeKind::Collapsible:
 	{
 		if (Flexible)
@@ -1201,6 +2248,22 @@ rect PanelContent::ScrollTrack(const UiNode& Item) const
 {
 	// 6 px: a 4 px pill has a 2 px end radius, which rasterises as a one-pixel nub rather than a curve.
 	const float TrackWidth = std::round(6.f * Scale);
+
+	if (Item.Kind == UiNodeKind::TableList || Item.Kind == UiNodeKind::HexView)
+	{
+		// A wide table/dump is scrolled horizontally by its section; keep the vertical bar at the visible edge.
+		const rect View = VisibleBounds(Item);
+		const float Right = std::min(Item.Bounds.right, View.right) - std::round(3.f * Scale);
+		const float Top = std::max(Item.Kind == UiNodeKind::TableList ? Item.Bounds.top + TableHeader * Scale : Item.Bounds.top,
+			View.top);
+		const float Bottom = std::min(Item.Bounds.bottom, View.bottom) - 4.f * Scale;
+
+		if (Bottom <= Top || Right <= View.left)
+			return rect();
+
+		return rect(Right - TrackWidth, Top, Right, Bottom);
+	}
+
 	const float Right = Item.Bounds.right - std::round(3.f * Scale);
 	return rect(Right - TrackWidth, Item.Bounds.top + 4.f * Scale, Right, Item.Bounds.bottom - 4.f * Scale);
 }
@@ -1208,12 +2271,131 @@ rect PanelContent::ScrollTrack(const UiNode& Item) const
 rect PanelContent::ScrollThumb(const UiNode& Item) const
 {
 	const rect Track = ScrollTrack(Item);
-	const float Visible = Item.Bounds.height();
+	const float Visible = Item.Kind == UiNodeKind::TableList
+		? std::max(0.f, Item.Bounds.height() - TableHeader * Scale)
+		: Item.Bounds.height();
 	const float ThumbHeight = std::min(Track.height(), std::max(24.f * Scale, Track.height() * Visible / (Visible + Item.ScrollMax)));
 	const float Travel = std::max(0.f, Track.height() - ThumbHeight);
 	const float Offset = Item.ScrollMax > 0.f ? (Item.Scroll / Item.ScrollMax) * Travel : 0.f;
 	const float Top = std::round(Track.top + Offset);
 	return rect(Track.left, Top, Track.right, Top + std::round(ThumbHeight));
+}
+
+rect PanelContent::VisibleBounds(const UiNode& Item) const
+{
+	rect Result = Item.Bounds;
+
+	for (int Parent = Item.Parent; Valid(Parent); Parent = Nodes[Parent].Parent)
+	{
+		const UiNode& Ancestor = Nodes[Parent];
+
+		if (!Ancestor.Style.Clip && !Ancestor.Style.Scroll && !Ancestor.Style.ScrollX)
+			continue;
+
+		Result = IntersectionRect(Result, Ancestor.Bounds);
+	}
+
+	return Result;
+}
+
+rect PanelContent::MenuRect(const UiNode& Item) const
+{
+	// The menu belongs to the panel, not to the node: it is kept inside the panel's content area so a
+	// short table near the bottom still gets a fully visible menu.
+	const rect View = ContentArea;
+	const float ItemHeight = 20.f * Scale;
+	float Height = MenuItemsOffset(Item, Scale) + 4.f * Scale;
+
+	for (size_t Index = 0; Index < Item.MenuItems.size(); Index++)
+	{
+		Height += ItemHeight;
+
+		if (MenuHasSeparator(Item, static_cast<int>(Index)))
+			Height += 7.f * Scale;
+	}
+
+	// Width follows the content: the widest label (plus its decoration and hint) decides it, so a menu of
+	// short words stays narrow instead of reserving space for the longest possible entry.
+	const float ItemFont = 11.5f * Scale;
+	float Label = 0.f;
+	float Hint = 0.f;
+
+	for (size_t Index = 0; Index < Item.MenuItems.size(); Index++)
+	{
+		Label = std::max(Label, renderer::measure_text(Item.MenuItems[Index].c_str(), ItemFont).width());
+
+		if (Index < Item.MenuHints.size() && !Item.MenuHints[Index].empty())
+			Hint = std::max(Hint, renderer::measure_text(Item.MenuHints[Index].c_str(), ItemFont).width());
+	}
+
+	const float Decoration = MenuDecorationWidth(Item, Scale);
+	const float Width = std::clamp(14.f * Scale + Decoration + Label + (Hint > 0.f ? 10.f * Scale + Hint : 0.f) + 10.f * Scale,
+		110.f * Scale, std::max(110.f * Scale, View.width()));
+
+	const float Left = std::clamp(Item.MenuPoint.x, View.left, std::max(View.left, View.right - Width));
+	const float Top = std::clamp(Item.MenuPoint.y, View.top, std::max(View.top, View.bottom - Height));
+	return rect(Left, Top, Left + Width, Top + Height);
+}
+
+int PanelContent::MenuIndexAt(const UiNode& Item, vec2 Point) const
+{
+	if (!Item.MenuOpen || Item.MenuItems.empty())
+		return -1;
+
+	const rect Menu = MenuRect(Item);
+
+	if (!PointInRect(Menu, Point))
+		return -1;
+
+	const float ItemHeight = 20.f * Scale;
+	const float ItemsTop = Menu.top + MenuItemsOffset(Item, Scale);
+
+	for (size_t Index = 0; Index < Item.MenuItems.size(); Index++)
+	{
+		const float Top = MenuItemTop(Item, static_cast<int>(Index), Scale, ItemsTop);
+
+		if (Point.y >= Top && Point.y < Top + ItemHeight)
+			return MenuItemDisabled(Item, static_cast<int>(Index)) ? -1 : static_cast<int>(Index);
+	}
+
+	return -1;
+}
+
+rect PanelContent::ScrollTrackX(const UiNode& Item) const
+{
+	// The bar is pinned to the bottom of the visible part of the node: a tall section that runs past the
+	// panel viewport keeps its slider on screen instead of parking it below the fold.
+	const rect View = VisibleBounds(Item);
+	const float TrackHeight = std::round(6.f * Scale);
+
+	if (View.width() <= 1.f || View.height() <= TrackHeight)
+		return rect();
+
+	const float Bottom = std::min(Item.Bounds.bottom, View.bottom) - std::round(3.f * Scale);
+	const float Top = std::max(View.top, Bottom - TrackHeight);
+	const float Inset = std::round(4.f * Scale);
+	const float Left = std::max(Item.Bounds.left, View.left) + Inset;
+	const float Right = std::min(Item.Bounds.right, View.right) - Inset;
+
+	if (Right <= Left || Bottom <= Top)
+		return rect();
+
+	return rect(Left, Top, Right, Bottom);
+}
+
+rect PanelContent::ScrollThumbX(const UiNode& Item) const
+{
+	const rect Track = ScrollTrackX(Item);
+
+	if (Track.width() <= 1.f)
+		return rect();
+
+	const float Visible = Item.Bounds.width();
+	const float ThumbWidth = std::min(Track.width(), std::max(24.f * Scale, Track.width() * Visible / (Visible + Item.ScrollMaxX)));
+	const float Travel = std::max(0.f, Track.width() - ThumbWidth);
+	const float Offset = Item.ScrollMaxX > 0.f ? (Item.ScrollX / Item.ScrollMaxX) * Travel : 0.f;
+	const float Left = std::round(Track.left + Offset);
+	return rect(Left, Track.top, Left + std::round(ThumbWidth), Track.bottom);
 }
 
 float PanelContent::InputScroll(const UiNode& Item) const
@@ -1236,7 +2418,7 @@ bool PanelContent::PointVisible(int Node, vec2 Point) const
 	{
 		const UiNode& Ancestor = Nodes[Parent];
 
-		if ((Ancestor.Style.Clip || Ancestor.Style.Scroll) && !PointInRect(Ancestor.Bounds, Point))
+		if ((Ancestor.Style.Clip || Ancestor.Style.Scroll || Ancestor.Style.ScrollX) && !PointInRect(Ancestor.Bounds, Point))
 			return false;
 	}
 
@@ -1253,7 +2435,7 @@ int PanelContent::HitTestNode(int Node, vec2 Point) const
 	if (!Item.Visible || !Item.Enabled)
 		return -1;
 
-	if ((Item.Style.Clip || Item.Style.Scroll) && !PointInRect(Item.Bounds, Point))
+	if ((Item.Style.Clip || Item.Style.Scroll || Item.Style.ScrollX) && !PointInRect(Item.Bounds, Point))
 		return -1;
 
 	for (size_t Index = Item.Children.size(); Index > 0; Index--)
@@ -1287,7 +2469,7 @@ int PanelContent::TooltipNode(int Node, vec2 Point) const
 
 	const bool Inside = PointInRect(Item.Bounds, Point);
 
-	if ((Item.Style.Clip || Item.Style.Scroll) && !Inside)
+	if ((Item.Style.Clip || Item.Style.Scroll || Item.Style.ScrollX) && !Inside)
 		return -1;
 
 	for (size_t Index = Item.Children.size(); Index > 0; Index--)
@@ -1315,13 +2497,18 @@ int PanelContent::ScrollbarAt(vec2 Point) const
 	{
 		const UiNode& Item = Nodes[Node];
 
-		if (!IsScrollable(Item) || Item.ScrollMax <= 0.f || !Item.Enabled || !HasArea(Item.Bounds))
+		if (!IsScrollable(Item) || (Item.ScrollMax <= 0.f && Item.ScrollMaxX <= 0.f) || !Item.Enabled || !HasArea(Item.Bounds))
 			continue;
 
 		const rect Track = ScrollTrack(Item);
 		const rect Hit(Track.left - 6.f * Scale, Track.top, Item.Bounds.right, Track.bottom);
+		const rect TrackX = ScrollTrackX(Item);
+		const rect HitX(TrackX.left, TrackX.top - 6.f * Scale, TrackX.right, TrackX.bottom);
 
-		if (!PointInRect(Hit, Point) || !PointVisible(Node, Point))
+		const bool VerticalHit = Item.ScrollMax > 0.f && PointInRect(Hit, Point);
+		const bool HorizontalHit = Item.ScrollMaxX > 0.f && TrackX.width() > 1.f && PointInRect(HitX, Point);
+
+		if ((!VerticalHit && !HorizontalHit) || !PointVisible(Node, Point))
 			continue;
 
 		const float Area = Item.Bounds.width() * Item.Bounds.height();
@@ -1346,7 +2533,8 @@ int PanelContent::FindScrollNode(vec2 Point) const
 		const UiNode& Item = Nodes[Node];
 
 		// Containers that cannot scroll must not swallow the wheel from a scrollable ancestor.
-		if (!IsScrollable(Item) || Item.ScrollMax <= 0.f || !PointInRect(Item.Bounds, Point) || !PointVisible(Node, Point))
+		if (!IsScrollable(Item) || (Item.ScrollMax <= 0.f && Item.ScrollMaxX <= 0.f) ||
+			!PointInRect(Item.Bounds, Point) || !PointVisible(Node, Point))
 			continue;
 
 		const float Area = Item.Bounds.width() * Item.Bounds.height();
@@ -1449,6 +2637,102 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 	DragNode = -1;
 	DragKind = 0;
 
+	// An open context menu swallows the next click; outside clicks just dismiss it. Choosing an item closes
+	// the menu first, so the owner's handler may reopen it (options that toggle in place).
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		UiNode& Item = Nodes[Index];
+
+		if (!Item.MenuOpen)
+			continue;
+
+		if (PointInRect(MenuRect(Item), Point))
+		{
+			const int Choice = MenuIndexAt(Item, Point);
+
+			if (Choice >= 0)
+			{
+				std::function<void(int)> Select = Item.OnMenuSelect;
+				Item.MenuOpen = false;
+				Item.MenuHover = -1;
+
+				if (Select)
+					Select(Choice);
+			}
+
+			return true;
+		}
+
+		Item.MenuOpen = false;
+		Item.MenuHover = -1;
+	}
+
+	// A press inside the cell being edited keeps editing; anywhere else commits the text.
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		UiNode& Item = Nodes[Index];
+
+		if (Item.Kind != UiNodeKind::TableList || Item.EditRow < 0)
+			continue;
+
+		if (TableListRowAt(Item, Point) == Item.EditRow && TableListColumnAt(Item, Point) == Item.EditColumn && PointVisible(Index, Point))
+			return true;
+
+		CommitTableEdit(Index);
+	}
+
+	// Any press away from the menu finishes an inline edit; a pending complete value is written.
+	for (UiNode& Item : Nodes)
+	{
+		if (Item.Kind == UiNodeKind::HexView && Item.HexEditing)
+			HexEndEdit(Item, true);
+	}
+
+	// Hex dump: left press starts a selection in the column under the pointer; dragging extends it across
+	// rows. A double-click on a value or character starts editing it. A press on the dump's scrollbar
+	// belongs to the scrollbar even where the bar overlays the text column.
+	const bool OnScrollbar = ScrollbarAt(Point) >= 0;
+
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()) && !OnScrollbar; Index++)
+	{
+		UiNode& Item = Nodes[Index];
+		int Column = 1;
+		uint64_t Address = 0;
+		uint64_t Width = 1;
+
+		if (Item.Kind != UiNodeKind::HexView || !Item.Visible || !HexHit(Item, Point, Column, Address, Width) ||
+			!PointVisible(Index, Point))
+			continue;
+
+		const uint64_t Now = GetTickCount64();
+		const bool DoubleClick = Index == LastHexClickNode && Column == LastHexClickColumn && Address == LastHexClickAddress &&
+			Now - LastHexClickTime <= static_cast<uint64_t>(GetDoubleClickTime());
+
+		LastHexClickNode = Index;
+		LastHexClickColumn = Column;
+		LastHexClickAddress = Address;
+		LastHexClickTime = DoubleClick ? 0 : Now;
+
+		ClearFocus();
+		Focused = Index;
+		Item.MenuOpen = false;
+		Item.HexSelColumn = Column;
+		Item.HexSelAnchor = Address;
+		Item.HexSelStart = Address;
+		Item.HexSelEnd = std::min(Address + Width, Item.HexSpan);
+		Item.HexHasSelection = true;
+
+		if (DoubleClick && Column != 0 && Item.HexWrite)
+		{
+			HexBeginEdit(Item, Column, Address);
+			return true;
+		}
+
+		DragNode = Index;
+		DragKind = 6;
+		return true;
+	}
+
 	const int Bar = ScrollbarAt(Point);
 
 	if (Bar >= 0)
@@ -1456,6 +2740,26 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 		ClearFocus();
 		UiNode& Item = Nodes[Bar];
 		const rect Thumb = ScrollThumb(Item);
+		const rect TrackX = ScrollTrackX(Item);
+		const rect ThumbX = ScrollThumbX(Item);
+
+		// The horizontal bar sits at the bottom; anything above it is the vertical bar's hit strip.
+		if (Item.ScrollMaxX > 0.f && TrackX.width() > 1.f && Point.y >= TrackX.top - 4.f * Scale)
+		{
+			if (Point.x >= ThumbX.left && Point.x < ThumbX.right)
+			{
+				ScrollGrab = Point.x - ThumbX.left;
+			}
+			else
+			{
+				ScrollGrab = ThumbX.width() * 0.5f;
+				OnMouseMove(Point, Bar, 3);
+			}
+
+			DragNode = Bar;
+			DragKind = 3;
+			return true;
+		}
 
 		if (Point.y >= Thumb.top && Point.y < Thumb.bottom)
 		{
@@ -1469,6 +2773,66 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 
 		DragNode = Bar;
 		DragKind = 2;
+		return true;
+	}
+
+	// Table column dividers: pressing within 4 px of a header boundary starts a width drag.
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		UiNode& Item = Nodes[Index];
+
+		if (Item.Kind != UiNodeKind::TableList || !Item.Visible || Item.ColumnWidths.size() < 2 || !HasArea(Item.Bounds))
+			continue;
+
+		const rect Header(Item.Bounds.left, Item.Bounds.top, Item.Bounds.right, Item.Bounds.top + TableHeader * Scale);
+		if (!PointInRect(Header, Point) || !PointVisible(Index, Point))
+			continue;
+
+		float X = Item.Bounds.left;
+
+		for (size_t Column = 0; Column + 1 < Item.ColumnWidths.size(); Column++)
+		{
+			X += Item.ColumnWidths[Column] * Scale;
+
+			if (std::fabs(Point.x - X) > 4.f * Scale)
+				continue;
+
+			ClearFocus();
+			DragNode = Index;
+			DragKind = 5;
+			ResizeTableNode = Index;
+			ResizeTableColumn = static_cast<int>(Column);
+			ResizeStartWidth = Item.ColumnWidths[Column];
+			ResizeOrigin = Point;
+			return true;
+		}
+	}
+
+	// TableList cells: a click selects exactly one cell. Editing and navigation live in the owner's
+	// right-click menu.
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		UiNode& Item = Nodes[Index];
+
+		if (Item.Kind != UiNodeKind::TableList || !Item.Visible)
+			continue;
+
+		const int Row = TableListRowAt(Item, Point);
+		const int Column = TableListColumnAt(Item, Point);
+
+		if (Row < 0 || Column < 0 || !PointVisible(Index, Point))
+			continue;
+
+		ClearFocus();
+		Focused = Index;
+		Item.SelectedRow = Row;
+		Item.SelectedColumn = Column;
+
+		std::function<void(int, int)> Callback = Item.OnCellClick;
+
+		if (Callback)
+			Callback(Row, Column);
+
 		return true;
 	}
 
@@ -1492,6 +2856,12 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 
 	switch (Item.Kind)
 	{
+	case UiNodeKind::DragHandle:
+		ClearFocus();
+		DragNode = Hit;
+		DragKind = 4;
+		DragLast = Point;
+		return true;
 	case UiNodeKind::Slider:
 		ClearFocus();
 		DragNode = Hit;
@@ -1560,6 +2930,12 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 
 void PanelContent::OnMouseMove(vec2 Point, int DragNode, int DragKind)
 {
+	for (UiNode& Item : Nodes)
+	{
+		if (Item.MenuOpen)
+			Item.MenuHover = MenuIndexAt(Item, Point);
+	}
+
 	if (!Valid(DragNode))
 		return;
 
@@ -1577,10 +2953,57 @@ void PanelContent::OnMouseMove(vec2 Point, int DragNode, int DragKind)
 		const float Offset = std::clamp(Point.y - ScrollGrab - Track.top, 0.f, Travel);
 		Item.Scroll = Offset / Travel * Item.ScrollMax;
 	}
+	else if (DragKind == 3 && Item.ScrollMaxX > 0.f)
+	{
+		const rect Track = ScrollTrackX(Item);
+		const rect Thumb = ScrollThumbX(Item);
+		const float Travel = std::max(1.f, Track.width() - Thumb.width());
+		const float Offset = std::clamp(Point.x - ScrollGrab - Track.left, 0.f, Travel);
+		Item.ScrollX = Offset / Travel * Item.ScrollMaxX;
+	}
+	else if (DragKind == 4)
+	{
+		const float Delta = Item.ResizeVertical ? Point.x - DragLast.x : Point.y - DragLast.y;
+		DragLast = Point;
+
+		if (Delta != 0.f && Item.OnResize)
+			Item.OnResize(Delta / (Scale > 0.f ? Scale : 1.f));
+	}
+	else if (DragKind == 5 && Item.Kind == UiNodeKind::TableList)
+	{
+		if (ResizeTableColumn < 0 || ResizeTableColumn >= static_cast<int>(Item.ColumnWidths.size()))
+			return;
+
+		const float Delta = (Point.x - ResizeOrigin.x) / (Scale > 0.f ? Scale : 1.f);
+		Item.ColumnWidths[static_cast<size_t>(ResizeTableColumn)] = std::clamp(ResizeStartWidth + Delta, 24.f, 600.f);
+
+		float Total = 0.f;
+		for (float Width : Item.ColumnWidths)
+			Total += Width;
+
+		Item.Style.Width = UiSize::Fixed;
+		Item.Style.WidthValue = Total;
+	}
+	else if (DragKind == 6 && Item.Kind == UiNodeKind::HexView)
+	{
+		int Column = Item.HexSelColumn;
+		uint64_t Address = 0;
+		uint64_t Width = 1;
+
+		if (!Item.HexEditing && HexHit(Item, Point, Column, Address, Width, Item.HexSelColumn))
+		{
+			Item.HexSelStart = std::min(Item.HexSelAnchor, Address);
+			Item.HexSelEnd = std::min(std::max(Item.HexSelAnchor, Address) + Width, Item.HexSpan);
+			Item.HexHasSelection = true;
+		}
+	}
 }
 
 void PanelContent::OnMouseUp(vec2 Point)
 {
+	ResizeTableNode = -1;
+	ResizeTableColumn = -1;
+
 	if (!Valid(Pressed))
 	{
 		Pressed = -1;
@@ -1603,21 +3026,146 @@ void PanelContent::CancelInteraction()
 	Pressed = -1;
 }
 
-bool PanelContent::OnWheel(vec2 Point, float Delta)
+bool PanelContent::OnWheel(vec2 Point, float Delta, bool Horizontal)
 {
 	const int Node = FindScrollNode(Point);
 
 	if (Node < 0)
 		return false;
 
-	UiNode& Item = Nodes[Node];
-	const float Step = Item.Kind == UiNodeKind::ListBox ? ListRowHeight() * 2.f : 48.f * Scale;
-	Item.Scroll = std::clamp(Item.Scroll - Delta * Step, 0.f, Item.ScrollMax);
-	return true;
+	if (Horizontal)
+	{
+		for (int Current = Node; Valid(Current); Current = Nodes[Current].Parent)
+		{
+			UiNode& Candidate = Nodes[Current];
+
+			if (Candidate.ScrollMaxX <= 0.f)
+				continue;
+
+			const float Step = 48.f * Scale;
+			Candidate.ScrollX = std::clamp(Candidate.ScrollX - Delta * Step, 0.f, Candidate.ScrollMaxX);
+			return true;
+		}
+
+		return false;
+	}
+
+	// A section may only scroll horizontally; the plain wheel must then scroll the panel behind it.
+	for (int Current = Node; Valid(Current); Current = Nodes[Current].Parent)
+	{
+		UiNode& Candidate = Nodes[Current];
+
+		if (Candidate.ScrollMax <= 0.f)
+			continue;
+
+		const float Step = Candidate.Kind == UiNodeKind::ListBox ? ListRowHeight() * 2.f : 48.f * Scale;
+		Candidate.Scroll = std::clamp(Candidate.Scroll - Delta * Step, 0.f, Candidate.ScrollMax);
+		return true;
+	}
+
+	return false;
 }
 
 bool PanelContent::OnChar(wchar_t Char)
 {
+	if (Valid(Focused) && Nodes[Focused].Kind == UiNodeKind::HexView)
+	{
+		// Enter, Escape and Backspace arrive through OnKey; here only typed characters are consumed.
+		UiNode& Dump = Nodes[Focused];
+
+		if (!Dump.HexEditing || Char < 32 || Char == 127)
+			return true;
+
+		if (Dump.HexEditColumn == 2)
+		{
+			std::vector<uint8_t> Bytes;
+
+			if (Dump.HexUtf16)
+				Bytes = { static_cast<uint8_t>(Char & 0xFF), static_cast<uint8_t>((Char >> 8) & 0xFF) };
+			else if (Char <= 0xFF)
+				Bytes = { static_cast<uint8_t>(Char) };
+			else
+				return true;
+
+			std::function<void(uint64_t, const std::vector<uint8_t>&)> Write = Dump.HexWrite;
+			Write(Dump.HexEditAddress, Bytes);
+
+			if (!HexMoveEdit(Dump, 1))
+				HexEndEdit(Dump, false);
+
+			HexReveal(Dump, Scale);
+			return true;
+		}
+
+		const bool Integer = Dump.HexKind == 1;
+		const int Digits = HexCellDigits(Dump);
+		const bool HexDigit = (Char >= L'0' && Char <= L'9') || (Char >= L'a' && Char <= L'f') || (Char >= L'A' && Char <= L'F');
+
+		if (Integer && Char == L' ')
+		{
+			// Space confirms a decimal value and moves on, like a complete hex cell does.
+			if (HexCommitEdit(Dump) && !HexMoveEdit(Dump, 1))
+				HexEndEdit(Dump, false);
+
+			HexReveal(Dump, Scale);
+			return true;
+		}
+
+		const bool Accept = Integer
+			? (Char >= L'0' && Char <= L'9') || (Char == L'-' && Dump.HexSigned && Dump.HexEditText.empty())
+			: HexDigit;
+
+		if (!Accept || static_cast<int>(Dump.HexEditText.size()) >= Digits)
+			return true;
+
+		Dump.HexEditText += static_cast<wchar_t>(towupper(Char));
+
+		// A full hex cell is written immediately and typing continues in the next cell.
+		if (!Integer && static_cast<int>(Dump.HexEditText.size()) == Digits)
+		{
+			if (HexCommitEdit(Dump) && !HexMoveEdit(Dump, 1))
+				HexEndEdit(Dump, false);
+
+			HexReveal(Dump, Scale);
+		}
+
+		return true;
+	}
+
+	if (Valid(Focused) && Nodes[Focused].Kind == UiNodeKind::TableList)
+	{
+		UiNode& Table = Nodes[Focused];
+
+		if (Table.EditRow < 0)
+			return false;
+
+		Table.EditCaret = std::clamp(Table.EditCaret, 0, static_cast<int>(Table.EditText.size()));
+
+		if (Char == L'\b')
+		{
+			if (Table.EditCaret > 0)
+			{
+				Table.EditText.erase(static_cast<size_t>(Table.EditCaret - 1), 1);
+				Table.EditCaret--;
+			}
+		}
+		else if (Char == L'\r' || Char == L'\n')
+		{
+			CommitTableEdit(Focused);
+		}
+		else if (Char == 27)
+		{
+			CancelTableEdit(Focused);
+		}
+		else if (Char >= 32)
+		{
+			Table.EditText.insert(static_cast<size_t>(Table.EditCaret), 1, Char);
+			Table.EditCaret++;
+		}
+
+		return true;
+	}
+
 	if (!Valid(Focused))
 		return false;
 
@@ -1669,6 +3217,101 @@ bool PanelContent::OnChar(wchar_t Char)
 
 bool PanelContent::OnKey(int Key)
 {
+	if (Key == VK_ESCAPE && OpenMenuNode() >= 0)
+	{
+		CloseMenus();
+		return true;
+	}
+
+	if (Valid(Focused) && Nodes[Focused].Kind == UiNodeKind::HexView)
+	{
+		UiNode& Dump = Nodes[Focused];
+		const bool Control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+
+		if (Control && Key == 'C')
+		{
+			HexCopySelection(Focused);
+			return true;
+		}
+
+		if (!Dump.HexEditing)
+			return false;
+
+		switch (Key)
+		{
+		case VK_ESCAPE:
+			HexEndEdit(Dump, false);
+			return true;
+		case VK_RETURN:
+			HexEndEdit(Dump, true);
+			return true;
+		case VK_BACK:
+			// Backspace edits the pending digits first, then steps back a cell without writing.
+			if (!Dump.HexEditText.empty())
+				Dump.HexEditText.pop_back();
+			else
+				HexMoveEdit(Dump, -1);
+
+			HexReveal(Dump, Scale);
+			return true;
+		case VK_LEFT:
+		case VK_RIGHT:
+			HexMoveEdit(Dump, Key == VK_LEFT ? -1 : 1);
+			HexReveal(Dump, Scale);
+			return true;
+		case VK_UP:
+		case VK_DOWN:
+		{
+			const int64_t Width = Dump.HexEditColumn == 1 ? HexUnitBytes(Dump) : Dump.HexUtf16 ? 2 : 1;
+			HexMoveEdit(Dump, (Key == VK_UP ? -16 : 16) / Width);
+			HexReveal(Dump, Scale);
+			return true;
+		}
+		default:
+			return true;
+		}
+	}
+
+	if (Valid(Focused) && Nodes[Focused].Kind == UiNodeKind::TableList)
+	{
+		UiNode& Table = Nodes[Focused];
+
+		// F2 edits the selected cell when the owner allows it.
+		if (Table.EditRow < 0)
+			return Key == VK_F2 && BeginCellEdit(Focused, Table.SelectedRow, Table.SelectedColumn);
+
+		const int Length = static_cast<int>(Table.EditText.size());
+		Table.EditCaret = std::clamp(Table.EditCaret, 0, Length);
+
+		switch (Key)
+		{
+		case VK_LEFT:
+			Table.EditCaret = std::max(0, Table.EditCaret - 1);
+			return true;
+		case VK_RIGHT:
+			Table.EditCaret = std::min(Length, Table.EditCaret + 1);
+			return true;
+		case VK_HOME:
+			Table.EditCaret = 0;
+			return true;
+		case VK_END:
+			Table.EditCaret = Length;
+			return true;
+		case VK_DELETE:
+			if (Table.EditCaret < Length)
+				Table.EditText.erase(static_cast<size_t>(Table.EditCaret), 1);
+			return true;
+		case VK_RETURN:
+			CommitTableEdit(Focused);
+			return true;
+		case VK_ESCAPE:
+			CancelTableEdit(Focused);
+			return true;
+		default:
+			return false;
+		}
+	}
+
 	if (!Valid(Focused))
 		return false;
 
@@ -1876,13 +3519,20 @@ void PanelContent::DrawShapes(const UiTheme& Theme, float ScaleValue, vec2 Mouse
 
 void PanelContent::DrawScrollbar(const UiNode& Item, const UiTheme& Theme, float ScaleValue) const
 {
-	if (Item.ScrollMax <= 0.f || Item.Bounds.width() <= 12.f * ScaleValue)
-		return;
+	// Overlay-style scrollbars: no visible track, and a thumb quiet enough not to compete with content.
+	if (Item.ScrollMax > 0.f && Item.Bounds.width() > 12.f * ScaleValue)
+	{
+		const rect Track = ScrollTrack(Item);
+		renderer::draw_filled_rounded_rect(ScrollThumb(Item), Track.width() * 0.5f, WithAlpha(Theme.Muted, 0.45f));
+	}
 
-	// Overlay-style scrollbar: no visible track, and a thumb quiet enough not to compete with content.
-	const rect Track = ScrollTrack(Item);
-	const float Radius = Track.width() * 0.5f;
-	renderer::draw_filled_rounded_rect(ScrollThumb(Item), Radius, WithAlpha(Theme.Muted, 0.45f));
+	if (Item.ScrollMaxX > 0.f && Item.Bounds.height() > 12.f * ScaleValue)
+	{
+		const rect Track = ScrollTrackX(Item);
+
+		if (Track.width() > 1.f)
+			renderer::draw_filled_rounded_rect(ScrollThumbX(Item), Track.height() * 0.5f, WithAlpha(Theme.Muted, 0.45f));
+	}
 }
 
 void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleValue, vec2 Mouse, bool HoverAllowed, bool Disabled) const
@@ -2112,30 +3762,216 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 		DrawScrollbar(Item, Theme, ScaleValue);
 		break;
 	}
+	case UiNodeKind::TableList:
+	{
+		// Sticky header, striped body. Only rows crossing the viewport are painted.
+		const float RowPx = Item.RowHeight * ScaleValue;
+		const float HeaderPx = TableHeader * ScaleValue;
+		const rect View = Item.Bounds;
+		const float BodyTop = View.top + HeaderPx;
+		const float HeaderBottom = std::min(View.bottom, BodyTop);
+		// A full-width table stretches its last column to the node's edge instead of leaving dead space.
+		const std::vector<float> Widths = TableWidths(Item);
+		const color Stripe = Opaque(UiMix(Theme.Panel, Theme.Text, 0.045f));
+
+		renderer::push_clip(View);
+		renderer::draw_filled_rect(rect(View.left, View.top, View.right, HeaderBottom), Tint(Theme.Header));
+		renderer::draw_filled_rect(rect(View.left, HeaderBottom - std::max(1.f, std::round(ScaleValue)), View.right, HeaderBottom),
+			Tint(Theme.Border));
+
+		{
+			float SeparatorX = View.left;
+			const float Hair = std::max(1.f, std::round(ScaleValue));
+
+			for (size_t Column = 0; Column + 1 < Widths.size(); Column++)
+			{
+				SeparatorX += Widths[Column] * ScaleValue;
+
+				if (SeparatorX <= View.left || SeparatorX >= View.right)
+					continue;
+
+				const float X = std::round(SeparatorX);
+				renderer::draw_filled_rect(rect(X - Hair * 0.5f, View.top, X + Hair * 0.5f, HeaderBottom), Tint(Theme.Border));
+			}
+		}
+
+		if (BodyTop < View.bottom && RowPx > 0.f)
+		{
+			const int First = std::max(0, static_cast<int>(std::floor(Item.Scroll / RowPx)));
+
+			for (int Index = First; Index < static_cast<int>(Item.Rows.size()); Index++)
+			{
+				const float Top = BodyTop + static_cast<float>(Index) * RowPx - Item.Scroll;
+				if (Top >= View.bottom)
+					break;
+
+				const rect RowRect(View.left, std::max(BodyTop, Top), View.right, std::min(View.bottom, Top + RowPx));
+
+				if (Index & 1)
+					renderer::draw_filled_rect(RowRect, Stripe);
+
+				// Single-cell selection: only the clicked cell carries the tint.
+				if (Index == Item.SelectedRow && Item.SelectedColumn >= 0 &&
+					Item.SelectedColumn < static_cast<int>(Widths.size()))
+				{
+					float CellX = View.left;
+
+					for (int Column = 0; Column < Item.SelectedColumn; Column++)
+						CellX += Widths[static_cast<size_t>(Column)] * ScaleValue;
+
+					const float Width = Widths[static_cast<size_t>(Item.SelectedColumn)] * ScaleValue;
+					renderer::draw_filled_rect(rect(CellX, RowRect.top, CellX + Width, RowRect.bottom), Tint(Theme.AccentSoft));
+				}
+
+				// The cell being edited gets a dashed outline (style, not colour, of the reference).
+				if (Index == Item.EditRow && Item.EditColumn >= 0 && Item.EditColumn < static_cast<int>(Widths.size()))
+				{
+					float CellX = View.left;
+
+					for (int Column = 0; Column < Item.EditColumn; Column++)
+						CellX += Widths[static_cast<size_t>(Column)] * ScaleValue;
+
+					const float Width = Widths[static_cast<size_t>(Item.EditColumn)] * ScaleValue;
+					DrawDashedRect(rect(CellX, RowRect.top, CellX + Width, RowRect.bottom), ScaleValue, Tint(Theme.Accent));
+				}
+			}
+		}
+
+		renderer::pop_clip();
+		break;
+	}
+	case UiNodeKind::HexView:
+	{
+		const float RowPx = Item.RowHeight * ScaleValue;
+		const uint64_t Rows = HexRowCount(Item);
+		const uint64_t First = HexFirstRow(Item, RowPx);
+		const uint64_t VisibleRows = static_cast<uint64_t>(std::max(0.f, std::floor(Item.Bounds.height() / RowPx)));
+		const uint64_t Last = std::min(Rows, First + VisibleRows);
+
+		renderer::push_clip(Item.Bounds);
+
+		const HexGeometry Layout = HexLayout(Item, Item.Bounds.left, ScaleValue);
+		const uint64_t Unit = static_cast<uint64_t>(Layout.Unit);
+		const uint64_t Stride = Item.HexUtf16 ? 2 : 1;
+		const float HalfChar = Layout.CharWidth * 0.5f;
+
+		// The selection is highlighted only in the column it was made in.
+		if (Item.HexHasSelection && Item.HexSelEnd > Item.HexSelStart)
+		{
+			const color Fill = Tint(Theme.AccentSoft);
+			const float AddressRight = Layout.AddressX +
+				static_cast<float>(Item.HexAddressChars > 0 ? Item.HexAddressChars : 8) * Layout.CharWidth;
+
+			for (uint64_t Index = std::max(First, Item.HexSelStart / 16); Index < Last; Index++)
+			{
+				const uint64_t RowStart = Index * 16;
+				const uint64_t Low = std::max(Item.HexSelStart, RowStart);
+				const uint64_t High = std::min(Item.HexSelEnd, RowStart + 16);
+
+				if (Low >= High)
+					break;
+
+				const float Top = Item.Bounds.top + static_cast<float>(Index - First) * RowPx;
+
+				if (Item.HexSelColumn == 0)
+				{
+					renderer::draw_filled_rect(rect(Layout.AddressX - HalfChar, Top, AddressRight + HalfChar, Top + RowPx), Fill);
+				}
+				else if (Item.HexSelColumn == 1)
+				{
+					const float FirstCell = static_cast<float>((Low - RowStart) / Unit);
+					const float LastCell = static_cast<float>((High - 1 - RowStart) / Unit);
+
+					renderer::draw_filled_rect(rect(Layout.ValuesX + FirstCell * Layout.CellWidth - HalfChar, Top,
+						Layout.ValuesX + LastCell * Layout.CellWidth + Layout.DigitsWidth + HalfChar, Top + RowPx), Fill);
+				}
+				else
+				{
+					const float FirstChar = static_cast<float>((Low - RowStart) / Stride);
+					const float EndChar = static_cast<float>((High - 1 - RowStart) / Stride + 1);
+
+					renderer::draw_filled_rect(rect(Layout.TextX + FirstChar * Layout.CharWidth, Top,
+						Layout.TextX + EndChar * Layout.CharWidth, Top + RowPx), Fill);
+				}
+			}
+		}
+
+		// The cell being typed into gets the dashed outline used for renames elsewhere.
+		if (Item.HexEditing)
+		{
+			const uint64_t Row = Item.HexEditAddress / 16;
+
+			if (Row >= First && Row < Last)
+			{
+				const float Top = Item.Bounds.top + static_cast<float>(Row - First) * RowPx;
+				const uint64_t Offset = Item.HexEditAddress % 16;
+				rect Box;
+
+				if (Item.HexEditColumn == 1)
+				{
+					const float Left = Layout.ValuesX + static_cast<float>(Offset / Unit) * Layout.CellWidth;
+					Box = rect(Left - HalfChar, Top, Left + Layout.DigitsWidth + HalfChar, Top + RowPx);
+				}
+				else
+				{
+					const float Left = Layout.TextX + static_cast<float>(Offset / Stride) * Layout.CharWidth;
+					Box = rect(Left - 1.f * ScaleValue, Top, Left + Layout.CharWidth + 1.f * ScaleValue, Top + RowPx);
+				}
+
+				DrawDashedRect(Box, ScaleValue, Tint(Theme.Accent));
+			}
+		}
+
+		renderer::pop_clip();
+		break;
+	}
 	case UiNodeKind::Collapsible:
 	{
 		const rect Header = InteractiveRect(Item);
 
-		if (Item.Style.Background.Set)
-			renderer::draw_filled_rounded_rect(Item.Bounds, Radius, Tint(ResolvePaint(Item.Style.Background, Theme, UiColorRole::Panel)));
+		// Flat section header: no card, no outline. A hover wash and a hairline rule below the header
+		// carry the structure, so the section reads as part of the panel.
+		if (Hovered)
+			renderer::draw_filled_rect(Header, Tint(Theme.TabHover));
+		else if (Item.Style.Background.Set)
+			renderer::draw_filled_rect(Item.Bounds, Tint(ResolvePaint(Item.Style.Background, Theme, UiColorRole::Panel)));
 
-		renderer::draw_filled_rounded_rect(Header, Radius, Tint(Hovered ? Theme.TabHover : Theme.Header));
+		const float Rule = std::max(1.f, std::round(ScaleValue));
+		renderer::draw_filled_rect(rect(Item.Bounds.left, Header.bottom - Rule, Item.Bounds.right, Header.bottom),
+			Tint(WithAlpha(Theme.Border, 0.75f)));
 
 		if (Item.Style.Border.Set)
-			renderer::draw_rounded_rect(Item.Bounds, Radius, Line, Tint(ResolvePaint(Item.Style.Border, Theme, UiColorRole::Border)));
+			renderer::draw_rect(Item.Bounds, Line, Tint(ResolvePaint(Item.Style.Border, Theme, UiColorRole::Border)));
 
-		const float Glyph = 16.f * ScaleValue;
-		const vec2 Chevron(std::round(Header.left + 14.f * ScaleValue), std::round(Header.center().y));
+		const float Glyph = 14.f * ScaleValue;
+		const vec2 Chevron(std::round(Header.left + 8.f * ScaleValue), std::round(Header.center().y));
 		DrawUiIcon(Item.Checked ? UiIcon::ChevronDown : UiIcon::ChevronRight,
 			rect(Chevron.x - Glyph * 0.5f, Chevron.y - Glyph * 0.5f, Chevron.x + Glyph * 0.5f, Chevron.y + Glyph * 0.5f),
-			Tint(Theme.Muted), 1.4f * ScaleValue);
+			Tint(Hovered ? Theme.Text : Theme.Muted), 1.4f * ScaleValue);
+		break;
+	}
+	case UiNodeKind::DragHandle:
+	{
+		const float Hair = std::max(1.f, std::round(ScaleValue));
+		const color ResizeTint = Hovered ? Theme.Accent : WithAlpha(Theme.Border, 0.65f);
+
+		if (Item.ResizeVertical)
+		{
+			const float X = std::round(Item.Bounds.center().x);
+			renderer::draw_filled_rect(rect(X - Hair * 0.5f, Item.Bounds.top, X + Hair * 0.5f, Item.Bounds.bottom), ResizeTint);
+		}
+		else
+		{
+			const float Y = std::round(Item.Bounds.center().y);
+			renderer::draw_filled_rect(rect(Item.Bounds.left, Y - Hair * 0.5f, Item.Bounds.right, Y + Hair * 0.5f), ResizeTint);
+		}
 		break;
 	}
 	default:
 		break;
 	}
 
-	const bool ClipChildren = Item.Style.Clip || Item.Style.Scroll;
+	const bool ClipChildren = Item.Style.Clip || Item.Style.Scroll || Item.Style.ScrollX;
 	const bool ChildHover = HoverAllowed && (!ClipChildren || PointInRect(Item.Bounds, Mouse));
 
 	if (ClipChildren)
@@ -2146,9 +3982,6 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 
 	if (ClipChildren)
 		renderer::pop_clip();
-
-	if (Item.Style.Scroll)
-		DrawScrollbar(Item, Theme, ScaleValue);
 }
 
 void PanelContent::SetOccluders(const std::vector<rect>& Rects)
@@ -2169,13 +4002,101 @@ bool PanelContent::Occluded(rect Area) const
 
 void PanelContent::DrawText(const UiTheme& Theme, float ScaleValue, bool CaretVisible, rect Visible) const
 {
-	if (Valid(RootNode))
-		DrawTextNode(RootNode, Theme, ScaleValue, CaretVisible, false, Visible);
+	if (!Valid(RootNode))
+		return;
+
+	// Glyphs paint after all geometry, so an open context menu cannot cover the panel's text by drawing
+	// over it: every text line of the panel is scissored around the menu, then the menu draws last.
+	const int Menu = OpenMenuNode();
+	const size_t OccluderCount = Occluders.size();
+
+	if (Menu >= 0)
+		Occluders.push_back(MenuRect(Nodes[Menu]));
+
+	DrawTextNode(RootNode, Theme, ScaleValue, CaretVisible, false, Visible);
+	Occluders.resize(OccluderCount);
+
+	if (Menu >= 0)
+		DrawMenu(Menu, Theme, ScaleValue);
+}
+
+void PanelContent::DrawMenu(int Node, const UiTheme& Theme, float ScaleValue) const
+{
+	const UiNode& Item = Nodes[Node];
+	const rect Menu = MenuRect(Item);
+	const float ItemHeight = 20.f * ScaleValue;
+	const float ItemFont = 11.5f * ScaleValue;
+	const float ItemLine = renderer::line_height(ItemFont);
+	const float ItemsTop = Menu.top + MenuItemsOffset(Item, ScaleValue);
+
+	// Solid card: the shell glass must not show through the context menu.
+	renderer::draw_filled_rounded_rect(Menu, 6.f * ScaleValue, Opaque(UiMix(Theme.Menu, Theme.Window, 0.25f)));
+	renderer::draw_rounded_rect(Menu, 6.f * ScaleValue, 1.f * ScaleValue, Opaque(Theme.MenuBorder));
+
+	if (!Item.MenuTitle.empty())
+	{
+		const float HeaderHeight = 24.f * ScaleValue;
+		DrawTextLine(vec2(Menu.left + 8.f * ScaleValue, Menu.top + 6.f * ScaleValue), 11.f * ScaleValue, UiAlign::Start,
+			Item.MenuTitle.c_str(), Theme.Muted);
+		renderer::draw_filled_rect(rect(Menu.left + 6.f * ScaleValue, Menu.top + HeaderHeight,
+			Menu.right - 6.f * ScaleValue, Menu.top + HeaderHeight + std::max(1.f, ScaleValue)), Opaque(Theme.MenuBorder));
+	}
+
+	for (size_t Index = 0; Index < Item.MenuItems.size(); Index++)
+	{
+		const float ItemTop = MenuItemTop(Item, static_cast<int>(Index), ScaleValue, ItemsTop);
+		const float Top = ItemTop + (ItemHeight - ItemLine) * 0.5f;
+		const bool Checked = Index < Item.MenuChecks.size() && Item.MenuChecks[Index] != 0;
+		const bool Disabled = MenuItemDisabled(Item, static_cast<int>(Index));
+
+		if (static_cast<int>(Index) == Item.MenuHover)
+		{
+			renderer::draw_filled_rect(rect(Menu.left + 4.f * ScaleValue, ItemTop, Menu.right - 4.f * ScaleValue, ItemTop + ItemHeight),
+				Opaque(Theme.MenuHover));
+		}
+
+		if (Checked)
+		{
+			const float CheckSize = 12.f * ScaleValue;
+			const rect Check(Menu.left + 7.f * ScaleValue, ItemTop + (ItemHeight - CheckSize) * 0.5f,
+				Menu.left + 7.f * ScaleValue + CheckSize, ItemTop + (ItemHeight + CheckSize) * 0.5f);
+			DrawUiIcon(UiIcon::Check, Check, Theme.Accent, 1.4f * ScaleValue);
+		}
+		else if (Index < Item.MenuIcons.size() && Item.MenuIcons[Index] != UiIcon::None)
+		{
+			// An icon replaces the check column for actions that have no state to show.
+			const float IconSize = 13.f * ScaleValue;
+			const rect Icon(Menu.left + 6.f * ScaleValue, ItemTop + (ItemHeight - IconSize) * 0.5f,
+				Menu.left + 6.f * ScaleValue + IconSize, ItemTop + (ItemHeight + IconSize) * 0.5f);
+			DrawUiIcon(Item.MenuIcons[Index], Icon, Disabled ? WithAlpha(Theme.Muted, 0.4f) : Theme.Muted, 1.3f * ScaleValue);
+		}
+
+		const float LabelX = Menu.left + (MenuHasDecoration(Item) ? 26.f : 10.f) * ScaleValue;
+		DrawTextLine(vec2(LabelX, Top), ItemFont, UiAlign::Start, Item.MenuItems[Index].c_str(),
+			Disabled ? WithAlpha(Theme.Text, 0.4f) : Theme.Text);
+
+		if (Index < Item.MenuHints.size() && !Item.MenuHints[Index].empty())
+		{
+			DrawTextLine(vec2(Menu.right - 8.f * ScaleValue, Top), ItemFont, UiAlign::End,
+				Item.MenuHints[Index].c_str(), Theme.Muted);
+		}
+
+		if (MenuHasSeparator(Item, static_cast<int>(Index)))
+		{
+			const float Hair = std::max(1.f, ScaleValue);
+			const float Y = ItemTop + ItemHeight + 3.f * ScaleValue;
+			renderer::draw_filled_rect(rect(Menu.left + 8.f * ScaleValue, Y, Menu.right - 8.f * ScaleValue, Y + Hair),
+				Opaque(Theme.MenuBorder));
+		}
+	}
 }
 
 void PanelContent::DrawTextLine(vec2 Point, float Size, UiAlign Align, const wchar_t* Text, color Tint) const
 {
 	text_align Mode = text_align::left;
+
+	if (TextAlpha < 1.f)
+		Tint = WithAlpha(Tint, TextAlpha);
 
 	if (Align == UiAlign::Center)
 		Mode = text_align::center;
@@ -2196,54 +4117,47 @@ void PanelContent::DrawTextLine(vec2 Point, float Size, UiAlign Align, const wch
 		return;
 	}
 
-	// The renderer batches glyphs separately from geometry, so a partially covered string is emitted as
-	// runs of characters that clear every occluder instead of being drawn through an opaque surface.
-	const std::wstring Value(Text);
-	const float Width = renderer::measure_text(Text, Size).width();
-	float Cursor = Point.x;
+	// The renderer batches glyphs after all geometry, so an overlay cannot cover text by painting over it.
+	// Instead the whole string is drawn once per visible piece of its area, each piece a scissor rect that
+	// excludes every occluder: glyphs are cut at the overlay edge pixel-exactly, never dropped or shifted.
+	const float Margin = renderer::line_height(Size);
+	std::vector<rect> Pieces{ rect(Area.left - Margin, Area.top - Margin, Area.right + Margin, Area.bottom + Margin) };
+	std::vector<rect> Next;
 
-	if (Mode == text_align::center)
-		Cursor -= Width * 0.5f;
-	else if (Mode == text_align::right)
-		Cursor -= Width;
-
-	const float LineHeight = renderer::line_height(Size);
-	std::wstring Run;
-	float RunX = Cursor;
-
-	const auto Flush = [&]()
+	for (const rect& Cut : Occluders)
 	{
-		if (Run.empty())
-			return;
+		Next.clear();
 
-		renderer::draw_text(vec2(RunX, Point.y), Size, text_align::left, Run.c_str(), Tint);
-		Run.clear();
-	};
-
-	for (size_t Index = 0; Index < Value.size(); Index++)
-	{
-		const wchar_t Char = Value[Index];
-		wchar_t Single[2] = { Char, 0 };
-		const float CharWidth = renderer::measure_text(Single, Size).width();
-		const rect CharBox(Cursor, Point.y, Cursor + CharWidth, Point.y + LineHeight);
-
-		if (Occluded(CharBox))
+		for (const rect& Piece : Pieces)
 		{
-			Flush();
-			RunX = Cursor + CharWidth;
-		}
-		else
-		{
-			if (Run.empty())
-				RunX = Cursor;
+			if (!IntersectsRect(Piece, Cut))
+			{
+				Next.push_back(Piece);
+				continue;
+			}
 
-			Run.push_back(Char);
+			const float Top = std::max(Piece.top, Cut.top);
+			const float Bottom = std::min(Piece.bottom, Cut.bottom);
+
+			if (Cut.top > Piece.top)
+				Next.push_back(rect(Piece.left, Piece.top, Piece.right, Top));
+			if (Cut.bottom < Piece.bottom)
+				Next.push_back(rect(Piece.left, Bottom, Piece.right, Piece.bottom));
+			if (Cut.left > Piece.left)
+				Next.push_back(rect(Piece.left, Top, Cut.left, Bottom));
+			if (Cut.right < Piece.right)
+				Next.push_back(rect(Cut.right, Top, Piece.right, Bottom));
 		}
 
-		Cursor += CharWidth;
+		Pieces.swap(Next);
 	}
 
-	Flush();
+	for (const rect& Piece : Pieces)
+	{
+		renderer::push_clip(Piece);
+		renderer::draw_text(Point, Size, Mode, Text, Tint);
+		renderer::pop_clip();
+	}
 }
 
 void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue, bool CaretVisible, bool Disabled, rect Visible) const
@@ -2258,13 +4172,20 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 
 	const bool Off = Disabled || !Item.Enabled;
 	const auto Tint = [Off](color Value) { return Off ? WithAlpha(Value, 0.45f) : Value; };
+
+	const font_id PreviousFont = renderer::font();
+	bool FontOverridden = false;
+
+	if (!Item.FontName.empty())
+		FontOverridden = renderer::select_font(Item.FontName.c_str());
+
 	const float Font = Item.Style.FontSize * ScaleValue;
 	const float LineHeight = renderer::line_height(Font);
 	const float Pad = Item.Style.Padding * ScaleValue;
 	const float CenteredTop = Item.Bounds.center().y - LineHeight * 0.5f;
 	const color TextTint = Tint(ResolvePaint(Item.Style.TextColor, Theme, UiColorRole::Text));
 	const color MutedTint = Tint(Theme.Muted);
-	const bool ClipChildren = Item.Style.Clip || Item.Style.Scroll;
+	const bool ClipChildren = Item.Style.Clip || Item.Style.Scroll || Item.Style.ScrollX;
 	const rect ChildVisible = ClipChildren ? IntersectionRect(Visible, Item.Bounds) : Visible;
 
 	if (ClipChildren)
@@ -2426,12 +4347,251 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 		renderer::pop_clip();
 		break;
 	}
+	case UiNodeKind::TableList:
+	{
+		const float RowPx = Item.RowHeight * ScaleValue;
+		const float HeaderPx = TableHeader * ScaleValue;
+		const float ViewTop = Item.Bounds.top;
+		const float BodyTop = std::min(Item.Bounds.bottom, ViewTop + HeaderPx);
+		const float HeaderFont = 11.5f * ScaleValue;
+		const float HeaderLine = renderer::line_height(HeaderFont);
+		const float HeaderY = ViewTop + (HeaderPx - HeaderLine) * 0.5f;
+		const float RowLine = renderer::line_height(Font);
+		const std::vector<float> Widths = TableWidths(Item);
+
+		float X = Item.Bounds.left;
+		for (size_t Col = 0; Col < Item.Columns.size() && Col < Widths.size(); Col++)
+		{
+			const float Width = Widths[Col] * ScaleValue;
+			renderer::push_clip(rect(X, ViewTop, X + Width, BodyTop));
+			DrawTextLine(vec2(X + 4.f * ScaleValue, HeaderY), HeaderFont, UiAlign::Start, Item.Columns[Col].c_str(), Tint(Theme.Muted));
+			renderer::pop_clip();
+			X += Width;
+		}
+
+		if (BodyTop < Item.Bounds.bottom && RowPx > 0.f)
+		{
+			const int First = std::max(0, static_cast<int>(std::floor(Item.Scroll / RowPx)));
+
+			for (int Index = First; Index < static_cast<int>(Item.Rows.size()); Index++)
+			{
+				const float Top = BodyTop + static_cast<float>(Index) * RowPx - Item.Scroll;
+				if (Top >= Item.Bounds.bottom)
+					break;
+
+				if (Top + RowPx <= BodyTop)
+					continue;
+
+				const std::vector<std::wstring>& Row = Item.Rows[Index];
+				float CellX = Item.Bounds.left;
+
+				for (size_t Col = 0; Col < Row.size() && Col < Widths.size(); Col++)
+				{
+					const float Width = Widths[Col] * ScaleValue;
+					const bool Editing = static_cast<int>(Col) == Item.EditColumn && Index == Item.EditRow;
+					const std::wstring& Value = Editing ? Item.EditText : Row[Col];
+
+					renderer::push_clip(rect(CellX, std::max(BodyTop, Top), CellX + Width, std::min(Item.Bounds.bottom, Top + RowPx)));
+					DrawTextLine(vec2(CellX + 4.f * ScaleValue, Top + (RowPx - RowLine) * 0.5f), Font, UiAlign::Start,
+						Value.c_str(), TextTint);
+
+					if (Editing && CaretVisible)
+					{
+						const int Caret = std::clamp(Item.EditCaret, 0, static_cast<int>(Item.EditText.size()));
+						const std::wstring Prefix = Item.EditText.substr(0, static_cast<size_t>(Caret));
+						const float CaretX = CellX + 4.f * ScaleValue + renderer::measure_text(Prefix.c_str(), Font).width();
+						renderer::draw_filled_rect(rect(CaretX, Top + 3.f * ScaleValue, CaretX + std::max(1.f, ScaleValue),
+							Top + RowPx - 3.f * ScaleValue), Tint(Theme.Accent));
+					}
+
+					renderer::pop_clip();
+					CellX += Width;
+				}
+			}
+		}
+
+		break;
+	}
+	case UiNodeKind::HexView:
+	{
+		const float RowPx = Item.RowHeight * ScaleValue;
+		const float RowLine = renderer::line_height(Font);
+		const uint64_t Rows = HexRowCount(Item);
+		const uint64_t First = HexFirstRow(Item, RowPx);
+		const uint64_t VisibleRows = static_cast<uint64_t>(std::max(0.f, std::floor(Item.Bounds.height() / RowPx)));
+		const uint64_t Last = std::min(Rows, First + VisibleRows);
+		const HexGeometry Layout = HexLayout(Item, Item.Bounds.left, ScaleValue);
+		const bool Integer = Item.HexKind == 1;
+		const color AddressTint = Tint(Theme.Muted);
+		const color ChangedTint = Tint(Theme.Danger);
+		const int Stride = Item.HexUtf16 ? 2 : 1;
+
+		for (uint64_t Index = First; Index < Last; Index++)
+		{
+			const float Top = Item.Bounds.top + static_cast<float>(Index - First) * RowPx;
+			const float TextY = Top + (RowPx - RowLine) * 0.5f;
+			const uint64_t RowAddress = Index * 16;
+
+			// Resolve the row once; unmapped bytes and bytes past the span render as '?'. Bytes that differ
+			// from the baseline are drawn in a second, red pass over the same monospace grid.
+			uint8_t RowBytes[16] = {};
+			bool Present[16] = {};
+			bool Changed[16] = {};
+
+			for (uint64_t Byte = 0; Byte < 16; Byte++)
+			{
+				const uint64_t Address = RowAddress + Byte;
+				uint64_t FileOffset = Address;
+
+				if (Address >= Item.HexSpan || !Item.HexData)
+					continue;
+
+				if (Item.HexResolve && !Item.HexResolve(Address, FileOffset))
+					continue;
+
+				if (FileOffset >= Item.HexSize)
+					continue;
+
+				RowBytes[Byte] = Item.HexData[FileOffset];
+				Present[Byte] = true;
+				Changed[Byte] = Item.HexBaseline && Item.HexBaseline[FileOffset] != RowBytes[Byte];
+			}
+
+			if (Item.HexAddressText)
+			{
+				const std::wstring Label = Item.HexAddressText(RowAddress);
+				DrawTextLine(vec2(Layout.AddressX, TextY), Font, UiAlign::Start, Label.c_str(), AddressTint);
+			}
+			else
+			{
+				wchar_t Address[24];
+				swprintf_s(Address, L"%08llX", static_cast<unsigned long long>(RowAddress));
+				DrawTextLine(vec2(Layout.AddressX, TextY), Font, UiAlign::Start, Address, AddressTint);
+			}
+
+			const bool EditRow = Item.HexEditing && Item.HexEditAddress / 16 == Index;
+			const int EditOffset = EditRow ? static_cast<int>(Item.HexEditAddress % 16) : -1;
+
+			// Every cell is exactly Digits characters plus one space, so the monospace strings line up with
+			// the geometry used for hit testing and selection.
+			const size_t CellChars = static_cast<size_t>(Layout.Digits + 1);
+			std::wstring Values(static_cast<size_t>(Layout.Columns) * CellChars, L' ');
+			std::wstring ValuesChanged = Values;
+			bool AnyChanged = false;
+
+			for (int Column = 0; Column < Layout.Columns; Column++)
+			{
+				const int Base = Column * Layout.Unit;
+				const size_t At = static_cast<size_t>(Column) * CellChars;
+				uint64_t Raw = 0;
+				bool Complete = true;
+				bool CellChanged = false;
+
+				for (int Part = 0; Part < Layout.Unit; Part++)
+				{
+					Complete = Complete && Present[Base + Part];
+					CellChanged = CellChanged || Changed[Base + Part];
+					Raw |= static_cast<uint64_t>(RowBytes[Base + Part]) << (8 * Part);
+				}
+
+				// The edited cell is drawn separately below.
+				if (EditRow && Item.HexEditColumn == 1 && EditOffset == Base)
+					continue;
+
+				if (!Complete)
+				{
+					// Hex cells pad every digit; integer cells right-align a single marker like the numbers.
+					if (Integer)
+						Values[At + static_cast<size_t>(Layout.Digits - 1)] = L'?';
+					else
+						Values.replace(At, static_cast<size_t>(Layout.Digits), static_cast<size_t>(Layout.Digits), L'?');
+
+					continue;
+				}
+
+				const std::wstring Cell = HexFormatCell(Item, Raw, Layout.Unit, Layout.Digits, true);
+
+				for (size_t Char = 0; Char < Cell.size() && Char < static_cast<size_t>(Layout.Digits); Char++)
+				{
+					// Hex digits map back to their byte (little-endian: the last byte prints first); a
+					// decimal value is red as a whole when any of its bytes changed.
+					const bool Red = Integer ? CellChanged : Changed[Base + Layout.Unit - 1 - static_cast<int>(Char / 2)];
+					(Red ? ValuesChanged : Values)[At + Char] = Cell[Char];
+					AnyChanged = AnyChanged || Red;
+				}
+			}
+
+			DrawTextLine(vec2(Layout.ValuesX, TextY), Font, UiAlign::Start, Values.c_str(), TextTint);
+
+			if (AnyChanged)
+				DrawTextLine(vec2(Layout.ValuesX, TextY), Font, UiAlign::Start, ValuesChanged.c_str(), ChangedTint);
+
+			std::wstring TextColumn(static_cast<size_t>(Layout.TextChars), L' ');
+			std::wstring TextChanged = TextColumn;
+			bool AnyTextChanged = false;
+
+			for (int Char = 0; Char < Layout.TextChars; Char++)
+			{
+				const int Byte = Char * Stride;
+				const bool Complete = Present[Byte] && (Stride == 1 || Present[Byte + 1]);
+				const bool Red = Changed[Byte] || (Stride == 2 && Changed[Byte + 1]);
+				const unsigned Value = static_cast<unsigned>(RowBytes[Byte]) |
+					(Stride == 2 ? static_cast<unsigned>(RowBytes[Byte + 1]) << 8 : 0u);
+				const wchar_t Glyph = Complete ? HexTextChar(Value, Item.HexUtf16) : L'?';
+
+				(Red ? TextChanged : TextColumn)[static_cast<size_t>(Char)] = Glyph;
+				AnyTextChanged = AnyTextChanged || Red;
+			}
+
+			DrawTextLine(vec2(Layout.TextX, TextY), Font, UiAlign::Start, TextColumn.c_str(), TextTint);
+
+			if (AnyTextChanged)
+				DrawTextLine(vec2(Layout.TextX, TextY), Font, UiAlign::Start, TextChanged.c_str(), ChangedTint);
+
+			// Value being typed: pending digits with a caret, or the current value muted until typing starts.
+			if (EditRow && Item.HexEditColumn == 1)
+			{
+				const float CellX = Layout.ValuesX + static_cast<float>(EditOffset / Layout.Unit) * Layout.CellWidth;
+
+				if (Item.HexEditText.empty())
+				{
+					uint64_t Raw = 0;
+					bool Complete = true;
+
+					for (int Part = 0; Part < Layout.Unit; Part++)
+					{
+						Complete = Complete && Present[EditOffset + Part];
+						Raw |= static_cast<uint64_t>(RowBytes[EditOffset + Part]) << (8 * Part);
+					}
+
+					if (Complete)
+					{
+						DrawTextLine(vec2(CellX, TextY), Font, UiAlign::Start,
+							HexFormatCell(Item, Raw, Layout.Unit, Layout.Digits, true).c_str(), AddressTint);
+					}
+				}
+				else
+				{
+					DrawTextLine(vec2(CellX, TextY), Font, UiAlign::Start, Item.HexEditText.c_str(), Tint(Theme.Accent));
+				}
+
+				if (CaretVisible)
+				{
+					const float CaretX = CellX + static_cast<float>(Item.HexEditText.size()) * Layout.CharWidth;
+					renderer::draw_filled_rect(rect(CaretX, Top + 2.f * ScaleValue, CaretX + std::max(1.f, ScaleValue),
+						Top + RowPx - 2.f * ScaleValue), Tint(Theme.Accent));
+				}
+			}
+		}
+
+		break;
+	}
 	case UiNodeKind::Collapsible:
 	{
 		const rect Header = InteractiveRect(Item);
 		const float Top = Header.center().y - LineHeight * 0.5f;
 		renderer::push_clip(rect(Header.left, Header.top, Header.right - 6.f * ScaleValue, Header.bottom));
-		DrawTextLine(vec2(Header.left + 26.f * ScaleValue, Top), Font, UiAlign::Start, Item.Text.c_str(), TextTint);
+		DrawTextLine(vec2(Header.left + 18.f * ScaleValue, Top), Font, UiAlign::Start, Item.Text.c_str(), TextTint);
 		renderer::pop_clip();
 		break;
 	}
@@ -2439,11 +4599,19 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 		break;
 	}
 
+	if (FontOverridden)
+		renderer::set_font(PreviousFont);
+
 	for (int Child : Item.Children)
 		DrawTextNode(Child, Theme, ScaleValue, CaretVisible, Off, ChildVisible);
 
 	if (ClipChildren)
 		renderer::pop_clip();
+
+	// Scrollbars paint in the text pass so glyphs never cover the thumbs; they are the last thing in
+	// the node's subtree.
+	if (Item.Style.Scroll || Item.Style.ScrollX)
+		DrawScrollbar(Item, Theme, ScaleValue);
 }
 
 void PanelContent::DrawDebug(float ScaleValue) const
@@ -2496,6 +4664,14 @@ void PanelContent::DrawDebugNode(int Node, float ScaleValue) const
 	{
 		const rect Track = ScrollTrack(Item);
 		const rect Thumb = ScrollThumb(Item);
+		renderer::draw_rect(Track, Thickness, color(0.35f, 0.62f, 1.f, 0.55f));
+		renderer::draw_rect(Thumb, Thickness, color(1.f, 0.36f, 0.55f, 0.85f));
+	}
+
+	if (Item.Style.ScrollX && Item.ScrollMaxX > 0.f)
+	{
+		const rect Track = ScrollTrackX(Item);
+		const rect Thumb = ScrollThumbX(Item);
 		renderer::draw_rect(Track, Thickness, color(0.35f, 0.62f, 1.f, 0.55f));
 		renderer::draw_rect(Thumb, Thickness, color(1.f, 0.36f, 0.55f, 0.85f));
 	}

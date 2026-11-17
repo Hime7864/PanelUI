@@ -48,7 +48,10 @@ enum class UiNodeKind
 	Image,
 	ListBox,
 	Collapsible,
-	Icon
+	Icon,
+	DragHandle,
+	TableList,
+	HexView
 };
 
 // How an image is placed inside its widget bounds.
@@ -114,6 +117,7 @@ struct UiStyle
 	std::wstring AnchorTo;
 	bool Clip = false;
 	bool Scroll = false;
+	bool ScrollX = false;
 	bool Wrap = false;
 	UiPaint Background;
 	UiPaint Border;
@@ -140,6 +144,7 @@ struct UiNode
 	std::wstring Text;
 	std::wstring Placeholder;
 	std::wstring Tooltip;
+	std::wstring FontName;
 	int Parent = -1;
 	std::vector<int> Children;
 	rect Bounds;
@@ -162,8 +167,76 @@ struct UiNode
 	UiIcon IconGlyph = UiIcon::None;
 	UiImageFit Fit = UiImageFit::Contain;
 	std::vector<std::wstring> Options;
+	std::vector<std::wstring> Columns;
+	std::vector<std::vector<std::wstring>> Rows;
+	std::vector<float> ColumnWidths;
+	float RowHeight = 24.f;
+	int SelectedRow = -1;
+	int SelectedColumn = -1;
+	// Inline cell edit (TableList). CanEdit decides per cell; OnCellEdit receives the committed text.
+	int EditRow = -1;
+	int EditColumn = -1;
+	int EditCaret = 0;
+	std::wstring EditText;
+	std::function<bool(int, int)> CanEdit;
+	std::function<void(int, int, const std::wstring&)> OnCellEdit;
+	std::function<void(int, int)> OnCellClick;
+	// Right-click context menu (TableList, HexView). OnMenuOpen runs before the menu shows so the owner can
+	// fill the items for what was clicked; OnMenuSelect receives the item index. Only one menu per panel
+	// is open at a time and it draws above every other node of the panel.
+	std::vector<std::wstring> MenuItems;
+	std::vector<std::wstring> MenuHints;
+	std::vector<int> MenuChecks;
+	// Optional icon per item, drawn in the same column as the check mark (the check wins when set).
+	std::vector<UiIcon> MenuIcons;
+	std::vector<int> MenuSeparators;
+	// Items drawn muted and ignored by clicks (options that do not apply).
+	std::vector<int> MenuDisabled;
+	std::wstring MenuTitle;
+	std::function<void()> OnMenuOpen;
+	std::function<void(int)> OnMenuSelect;
+	bool MenuOpen = false;
+	vec2 MenuPoint;
+	int MenuHover = -1;
+	const uint8_t* HexData = nullptr;
+	size_t HexSize = 0;
+	// Pristine copy of HexData (same size). Bytes that differ from it render in the danger colour.
+	const uint8_t* HexBaseline = nullptr;
+	// Addressable span shown as rows; differs from HexSize when HexResolve maps a virtual address space.
+	uint64_t HexSpan = 0;
+	// Fixed width of the address column in characters; 0 uses the 8-digit default label.
+	int HexAddressChars = 0;
+	// Monospace advance in DIPs, measured during layout so input and drawing share one geometry.
+	float HexCharWidth = 0.f;
+	bool HexByRva = false;
+	int HexUnit = 1;
+	int HexKind = 0;
+	int HexSnapRow = -1;
+	std::function<bool(uint64_t, uint64_t&)> HexResolve;
+	std::function<std::wstring(uint64_t)> HexAddressText;
+	bool HexSigned = false;
+	bool HexUtf16 = false;
+	// Writes bytes at a view address (owner maps it to storage). Editing is enabled only when set.
+	std::function<void(uint64_t, const std::vector<uint8_t>&)> HexWrite;
+	// Byte under the pointer when the menu opened.
+	uint64_t HexMenuAddress = 0;
+	bool HexMenuOnByte = false;
+	// Selection is a byte range shown in exactly one column: 0 address, 1 values, 2 text.
+	int HexSelColumn = 1;
+	uint64_t HexSelAnchor = 0;
+	uint64_t HexSelStart = 0;
+	uint64_t HexSelEnd = 0;
+	bool HexHasSelection = false;
+	// Inline edit: column 1 types a cell value, column 2 overwrites characters; HexEditAddress is the
+	// first byte of the cell or character being typed.
+	bool HexEditing = false;
+	int HexEditColumn = 1;
+	uint64_t HexEditAddress = 0;
+	std::wstring HexEditText;
 	float Scroll = 0.f;
 	float ScrollMax = 0.f;
+	float ScrollX = 0.f;
+	float ScrollMaxX = 0.f;
 	float PopupScroll = 0.f;
 	UiWrapCache Wrap;
 	std::function<void()> OnClick;
@@ -172,6 +245,8 @@ struct UiNode
 	std::function<void(const std::wstring&)> OnEdit;
 	std::function<void(int)> OnSelect;
 	std::function<void(bool)> OnToggle;
+	std::function<void(float)> OnResize;
+	bool ResizeVertical = false;
 };
 
 class PanelContent
@@ -206,13 +281,27 @@ public:
 	int Icon(int Parent, UiIcon Glyph, float Size = 16.f);
 	int ListBox(int Parent, const std::vector<std::wstring>& Items, int Selected, std::function<void(int)> Select, float Height = 140.f);
 	int Collapsible(int Parent, const std::wstring& Title, bool Expanded, float Padding = 8.f, float Gap = 6.f);
+	// Fixed-height table with a sticky header and vertical scrolling. Rows are virtualized when drawn,
+	// so tens of thousands of rows cost one node. Widths are 96-DPI column widths.
+	int TableList(int Parent, std::vector<std::wstring> Headers, std::vector<std::vector<std::wstring>> Rows,
+		std::vector<float> Widths, float ViewHeight = 260.f, float RowHeight = 24.f);
+	// Virtualized hex dump over caller-owned bytes. ByRva selects the address space shown; SnapOffset is
+	// the address to scroll to. UnitBytes is 1/2/4/8; Kind is 0 hexadecimal, 1 integer (HexSigned picks
+	// the sign). Bytes with no backing file data render as '?'.
+	int HexView(int Parent, const uint8_t* Data, size_t Size, bool ByRva, uint64_t SnapOffset, float ViewHeight,
+		int UnitBytes = 1, int Kind = 0);
 	int Rect(int Parent, UiPaint Fill);
 	int Spacer(int Parent, float Size = 0.f, float Grow = 1.f);
+	// Thin strip that reports pointer drags along one axis in 96-DPI units. Vertical handles report
+	// horizontal deltas (table column resizing); horizontal handles report vertical deltas (row resizing).
+	int DragHandle(int Parent, bool Vertical, float Thickness);
 
 	void SetVisible(int Node, bool Visible);
 	void SetEnabled(int Node, bool Enabled);
 	void SetChecked(int Node, bool Checked);
 	void SetValue(int Node, double Value);
+	// Fades every glyph this panel draws (glyph tint alpha), used to push content behind a modal overlay.
+	void SetTextAlpha(float Alpha);
 
 	void Layout(rect Area, float Scale);
 	void DrawShapes(const UiTheme& Theme, float Scale, vec2 Mouse, bool HoverAllowed) const;
@@ -226,9 +315,29 @@ public:
 	void OnMouseMove(vec2 Point, int DragNode, int DragKind);
 	void OnMouseUp(vec2 Point);
 	void CancelInteraction();
-	bool OnWheel(vec2 Point, float Delta);
+	bool OnWheel(vec2 Point, float Delta, bool Horizontal = false);
+	bool OnRightMouseDown(vec2 Point);
 	bool OnChar(wchar_t Char);
 	bool OnKey(int Key);
+	// What a hex selection copies: the column it was made in, or one part of the row explicitly.
+	enum class HexCopy
+	{
+		Column,
+		Values,
+		Text,
+		Address,
+		All
+	};
+
+	// Copies the dump selection as shown in its column, or as the requested part: spaced values, decoded
+	// text, address lines, or address + values + text once per row.
+	void HexCopySelection(int Node, HexCopy Mode = HexCopy::Column) const;
+	// Starts editing a TableList cell when CanEdit allows it; the cell becomes an inline text field.
+	bool BeginCellEdit(int Node, int Row, int Column);
+	void CloseMenus();
+	// Carries scroll offsets, expanded sections and table selections over from the content this one
+	// replaces. Nodes are matched by position and kind, so it applies when a rebuild keeps the structure.
+	void AdoptViewState(const PanelContent& Previous);
 	void ClearFocus();
 	int FocusedNode() const { return Focused; }
 	bool HasFocus() const { return Focused >= 0; }
@@ -249,9 +358,19 @@ private:
 	int Pressed = -1;
 	int Focused = -1;
 	float ScrollGrab = 0.f;
+	vec2 DragLast;
+	int ResizeTableNode = -1;
+	int ResizeTableColumn = -1;
+	float ResizeStartWidth = 0.f;
+	vec2 ResizeOrigin;
+	uint64_t LastHexClickTime = 0;
+	int LastHexClickNode = -1;
+	int LastHexClickColumn = -1;
+	uint64_t LastHexClickAddress = 0;
 	int RadioGroups = 0;
 	std::vector<int> DeferredAbsolute;
-	std::vector<rect> Occluders;
+	mutable std::vector<rect> Occluders;
+	float TextAlpha = 1.f;
 
 	bool Valid(int Node) const { return Node >= 0 && Node < static_cast<int>(Nodes.size()); }
 	void LayoutNode(int Node, rect Bounds);
@@ -266,6 +385,9 @@ private:
 	rect InteractiveRect(const UiNode& Item) const;
 	rect ScrollTrack(const UiNode& Item) const;
 	rect ScrollThumb(const UiNode& Item) const;
+	rect ScrollTrackX(const UiNode& Item) const;
+	rect ScrollThumbX(const UiNode& Item) const;
+	rect VisibleBounds(const UiNode& Item) const;
 	float ListRowHeight() const;
 	float InputScroll(const UiNode& Item) const;
 	float PopupScrollMax(const UiNode& Item, rect Popup) const;
@@ -278,6 +400,30 @@ private:
 	int TooltipNode(int Node, vec2 Point) const;
 	int ScrollbarAt(vec2 Point) const;
 	int FindScrollNode(vec2 Point) const;
+	int TableListRowAt(const UiNode& Item, vec2 Point) const;
+	int TableListColumnAt(const UiNode& Item, vec2 Point) const;
+	// Column widths in DIPs, with any width beyond the configured columns given to the last one so a
+	// full-width table spans its node exactly.
+	std::vector<float> TableWidths(const UiNode& Item) const;
+	// Hit test against the dump grid. Column receives 0 address, 1 values, 2 text; Width is the bytes one
+	// click covers there. ForceColumn >= 0 clamps the point into that column and the visible rows (drags).
+	bool HexHit(const UiNode& Item, vec2 Point, int& Column, uint64_t& Address, uint64_t& Width, int ForceColumn = -1) const;
+	bool HexReadByte(const UiNode& Item, uint64_t Address, uint8_t& Value) const;
+	// Full row rendered like the view: space-separated value cells, and the decoded text column.
+	std::wstring HexRowValues(const UiNode& Item, uint64_t RowAddress) const;
+	std::wstring HexRowText(const UiNode& Item, uint64_t RowAddress) const;
+	// Address of one row without the column's alignment padding.
+	std::wstring HexAddressLabel(const UiNode& Item, uint64_t Address) const;
+	void HexBeginEdit(UiNode& Item, int Column, uint64_t Address);
+	bool HexCommitEdit(UiNode& Item);
+	void HexEndEdit(UiNode& Item, bool Commit);
+	rect MenuRect(const UiNode& Item) const;
+	int MenuIndexAt(const UiNode& Item, vec2 Point) const;
+	int OpenMenuNode() const;
+	void OpenMenu(int Node, vec2 Point);
+	void DrawMenu(int Node, const UiTheme& Theme, float Scale) const;
+	void CommitTableEdit(int Node);
+	void CancelTableEdit(int Node);
 	bool PointVisible(int Node, vec2 Point) const;
 	void DrawShapesNode(int Node, const UiTheme& Theme, float Scale, vec2 Mouse, bool HoverAllowed, bool Disabled) const;
 	void DrawTextNode(int Node, const UiTheme& Theme, float Scale, bool CaretVisible, bool Disabled, rect Visible) const;

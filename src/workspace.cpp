@@ -727,10 +727,14 @@ void WorkspaceModel::BuildTabs(int GroupIndex)
 
 	// The new-tab button is a square centred on the tab row (tabs start TabTop below the header top).
 	const float TabCenterY = std::round((Group.Header.top + TabTop + Group.Header.bottom) * 0.5f);
-	Group.NewTab = UiSnap(rect(Bounds.right - Pad - PlusSize, TabCenterY - PlusSize * 0.5f, Bounds.right - Pad, TabCenterY + PlusSize * 0.5f));
+
+	if (AllowNewTabs)
+		Group.NewTab = UiSnap(rect(Bounds.right - Pad - PlusSize, TabCenterY - PlusSize * 0.5f, Bounds.right - Pad, TabCenterY + PlusSize * 0.5f));
+	else
+		Group.NewTab = rect();
 
 	const float ContentLeft = Bounds.left + Pad + GripWidth;
-	const float ContentRight = Bounds.right - Pad - PlusSize - 4.f * LayoutScale;
+	const float ContentRight = Bounds.right - Pad - (AllowNewTabs ? PlusSize + 4.f * LayoutScale : 0.f);
 	const float Available = std::max(0.f, ContentRight - ContentLeft);
 
 	const size_t Count = Group.Panels.size();
@@ -742,7 +746,8 @@ void WorkspaceModel::BuildTabs(int GroupIndex)
 		const std::wstring& Title = Panels[Group.Panels[Index]].Title;
 		const float TextWidth = renderer::measure_text(Title.c_str(), UiTabTextSize * LayoutScale).width();
 		// Title, then a gap the size of the close inset, then the close button and its inset.
-		const float Width = std::clamp(std::ceil(TextInset + TextWidth + CloseInset * 2.f + CloseSize), MinTab, MaxTab);
+		const float Trail = Panels[Group.Panels[Index]].Closable ? CloseInset * 2.f + CloseSize : TextInset;
+		const float Width = std::clamp(std::ceil(TextInset + TextWidth + Trail), MinTab, MaxTab);
 		Widths[Index] = Width;
 		Total += Width;
 	}
@@ -785,7 +790,7 @@ void WorkspaceModel::BuildTabs(int GroupIndex)
 		const float CenterY = (Tab.Bounds.top + Tab.Bounds.bottom) * 0.5f;
 
 		// A close button on a tab narrower than this would cover the whole tab and turn every click into a close.
-		if (Width >= 44.f * LayoutScale)
+		if (Panels[Tab.Panel].Closable && Width >= 44.f * LayoutScale)
 		{
 			Tab.Close = UiSnap(rect(Tab.Bounds.right - CloseSize - CloseInset, CenterY - CloseSize * 0.5f,
 				Tab.Bounds.right - CloseInset, CenterY + CloseSize * 0.5f));
@@ -805,6 +810,21 @@ int WorkspaceModel::LeafOfGroup(int Group) const
 	}
 
 	return -1;
+}
+
+bool WorkspaceModel::SetGroupShare(int Group, float Share)
+{
+	const int Leaf = LeafOfGroup(Group);
+	if (Leaf < 0)
+		return false;
+
+	const int Parent = Nodes[Leaf].Parent;
+	if (Parent < 0)
+		return false;
+
+	const float Clamped = std::clamp(Share, 0.05f, 0.95f);
+	Nodes[Parent].Ratio = Nodes[Parent].First == Leaf ? Clamped : 1.f - Clamped;
+	return true;
 }
 
 void WorkspaceModel::SplitLeaf(int Leaf, DockZone Zone, int Group)

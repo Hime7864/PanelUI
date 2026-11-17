@@ -17,6 +17,12 @@ struct UiPanelInit
 	int RelativeTo = -1;
 	bool Floating = false;
 	rect FloatBounds;
+	// Fraction of the new split this panel's group occupies when it docks beside another group.
+	float Share = 0.5f;
+	// False hides the tab close button for this panel.
+	bool Closable = true;
+	// False creates the panel without making it the active tab (e.g. a sibling tab after the default).
+	bool Activate = true;
 	std::function<void(PanelContent&)> Build;
 };
 
@@ -30,11 +36,25 @@ public:
 	// Content factory for tabs created by the shell ("+", New Panel, tab menu New panel).
 	// Unset means those tabs open empty.
 	void SetDefaultPanelBuild(std::function<void(PanelContent&)> Build);
+	// False removes every "add panel" affordance: header "+" buttons, the New Panel app-bar button and
+	// the tab-menu entry. Existing panels keep their tab menus.
+	void SetPanelCreationEnabled(bool Enabled);
+	// One custom action button in the app bar, drawn next to the settings button as icon + label.
+	void SetAppBarAction(UiIcon Icon, std::wstring Label, std::function<void()> OnClick);
+	// Swaps only the label (e.g. after picking a file); keeps the icon and callback.
+	void SetAppBarLabel(std::wstring Label);
+	// Queues a rebuild of every open panel with this title for the next frame. Use it when a model a
+	// Build callback reads has changed and the panel must repopulate.
+	void RefreshPanels(const std::wstring& Title);
+	// Makes the first open panel with this title its group's active tab.
+	bool ActivatePanel(const std::wstring& Title);
 	void OnMouseMove(vec2 Point);
 	void OnMouseDown(vec2 Point);
 	void OnRightMouseDown(vec2 Point);
 	void OnMouseUp(vec2 Point);
-	void OnMouseWheel(float Delta, vec2 Point);
+	// Horizontal is the alt+wheel axis: it moves the panel's horizontal scrollbar instead of scrolling
+	// vertically. Hosts pass the Alt key state; default keeps the plain wheel vertical.
+	void OnMouseWheel(float Delta, vec2 Point, bool Horizontal = false);
 	void OnMouseLeave();
 	void OnKeyDown(int Key);
 	void OnChar(wchar_t Char);
@@ -64,7 +84,7 @@ private:
 
 	void UpdateMetrics();
 	void EnsureStartup();
-	int CreatePanelWithContent(const std::wstring& Title, int Group, bool Activate, const std::function<void(PanelContent&)>& Build);
+	int CreatePanelWithContent(const std::wstring& Title, int Group, bool Activate, const std::function<void(PanelContent&)>& Build, bool Closable = true);
 	void EnsurePanelContent(int Panel, const std::function<void(PanelContent&)>& Build);
 	PanelContent* ContentForPanel(int Panel);
 	PanelContent* ActiveContent(int Group);
@@ -81,7 +101,7 @@ private:
 	bool ModalOpen() const;
 	void UpdateHover(float Delta);
 	void BuildOccluders();
-	bool OccludedByOverlay(rect Area) const;
+	void DrawOverlayClippedText(vec2 Point, float Size, const wchar_t* Text, color Tint) const;
 	void DrawTooltip();
 	rect PickerCloseRect() const;
 	const UiTheme& CurrentTheme() const;
@@ -114,6 +134,8 @@ private:
 	void OpenTabMenu(int Group, int Panel, vec2 Point);
 	void ExecuteTabMenu(int Action);
 	int TabMenuHit(vec2 Point) const;
+	int TabMenuCount() const;
+	int TabMenuAction(int Index) const;
 	rect TabMenuItemRect(int Index) const;
 	void BeginRename(int Panel);
 	void CommitRename();
@@ -144,6 +166,10 @@ private:
 	bool MouseInside = false;
 	bool SettingsOpen = false;
 	bool DebugRects = false;
+	bool PanelCreation = true;
+	UiIcon AppBarIcon = UiIcon::None;
+	std::wstring AppBarLabel;
+	std::function<void()> AppBarClick;
 	bool GlassMode = true;
 	bool DraggingGlass = false;
 	bool DraggingSurface = false;
@@ -155,6 +181,8 @@ private:
 	int PickerRole = -1;
 	int MenuGroup = -1;
 	int MenuPanel = -1;
+	// Actions shown for the last opened tab menu (see TabMenuAction); built from the panel's flags.
+	std::vector<int> TabMenuItems;
 	int MenuHover = -1;
 	int RenamingPanel = -1;
 	int ThemeIndex = 0;
@@ -204,6 +232,8 @@ private:
 	std::wstring Title = L"Workspace";
 	std::function<void(PanelContent&)> DefaultBuild;
 	std::vector<std::unique_ptr<PanelContent>> PanelContents;
+	std::vector<std::function<void(PanelContent&)>> PanelBuilds;
+	std::vector<std::wstring> PendingRefresh;
 	std::vector<UiPanelInit> StartupPanels;
 	vec2 Mouse;
 	float Scale = 1.f;
@@ -213,6 +243,7 @@ private:
 	rect AppBarRect;
 	rect WorkspaceRect;
 	rect SettingsButton;
+	rect AppBarButton;
 	rect NewPanelButton;
 	rect DebugButton;
 	rect WindowMin;
