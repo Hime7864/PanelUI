@@ -2914,6 +2914,19 @@ void UiShell::UpdateHoverCursor(vec2 Point)
 	const int Divider = Workspace.DividerAt(Point);
 	if (Divider >= 0 && Divider < static_cast<int>(Workspace.Nodes.size()))
 		HoverCursor = Workspace.Nodes[Divider].Horizontal ? 1 : 2;
+	else
+	{
+		// A list column boundary drags horizontally, so the pointer says so before the press.
+		const int Group = Workspace.GroupAt(Point);
+
+		if (Group >= 0 && PointInRect(GroupContentBounds(Group), Point))
+		{
+			PanelContent* Content = ActiveContent(Group);
+
+			if (Content && Content->ColumnBoundaryAt(Point))
+				HoverCursor = 1;
+		}
+	}
 }
 
 void UiShell::OnMouseMove(vec2 Point)

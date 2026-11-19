@@ -158,6 +158,11 @@ namespace
 		return std::find(Item.MenuSeparators.begin(), Item.MenuSeparators.end(), Index) != Item.MenuSeparators.end();
 	}
 
+	bool ListRowDivider(const UiNode& Item, int Index)
+	{
+		return std::find(Item.RowDividers.begin(), Item.RowDividers.end(), Index) != Item.RowDividers.end();
+	}
+
 	bool MenuItemDisabled(const UiNode& Item, int Index)
 	{
 		return std::find(Item.MenuDisabled.begin(), Item.MenuDisabled.end(), Index) != Item.MenuDisabled.end();
@@ -882,6 +887,149 @@ int PanelContent::HexView(int Parent, const uint8_t* Data, size_t Size, bool ByR
 	return Id;
 }
 
+int PanelContent::ListBoxRowAt(const UiNode& Item, vec2 Point) const
+{
+	if (Item.Kind != UiNodeKind::ListBox || Point.x < Item.Bounds.left || Point.x >= Item.Bounds.right ||
+		Point.y < Item.Bounds.top || Point.y >= Item.Bounds.bottom)
+		return -1;
+
+	const float Local = Point.y - (Item.Bounds.top + ListPad * Scale) + Item.Scroll;
+	const int Row = static_cast<int>(std::floor(Local / ListRowHeight()));
+	return Local >= 0.f && Row >= 0 && Row < static_cast<int>(Item.Options.size()) ? Row : -1;
+}
+
+float PanelContent::ListBoxTextX(const UiNode& Item) const
+{
+	return Item.Bounds.left + ListPad * Scale + 8.f * Scale;
+}
+
+float PanelContent::ListBoxMeasure(const UiNode& Item, const wchar_t* Text, float Size) const
+{
+	const font_id Previous = renderer::font();
+	const bool Overridden = !Item.FontName.empty() && renderer::select_font(Item.FontName.c_str());
+	const float Width = renderer::measure_text(Text, Size).width();
+
+	if (Overridden)
+		renderer::set_font(Previous);
+
+	return Width;
+}
+
+float PanelContent::ListBoxCharWidth(const UiNode& Item) const
+{
+	// Ink extents stop short of the last advance, so a trailing sentinel makes this the true pen advance.
+	const float Size = 12.f * Scale;
+	const float Width = ListBoxMeasure(Item, L"0000000000|", Size) - ListBoxMeasure(Item, L"|", Size);
+	return Width > 0.f ? Width / 10.f : Size * 0.55f;
+}
+
+int PanelContent::ListBoxBoundaryAt(const UiNode& Item, vec2 Point) const
+{
+	if (Item.Kind != UiNodeKind::ListBox || Item.ListBoundaries.empty() ||
+		Point.y < Item.Bounds.top || Point.y >= Item.Bounds.bottom)
+		return -1;
+
+	const float CharWidth = ListBoxCharWidth(Item);
+	const float TextX = ListBoxTextX(Item);
+	const float Reach = 4.f * Scale;
+
+	for (int Index = 0; Index < static_cast<int>(Item.ListBoundaries.size()); Index++)
+	{
+		const float X = TextX + Item.ListBoundaries[static_cast<size_t>(Index)] * CharWidth;
+
+		if (Point.x >= X - Reach && Point.x <= X + Reach)
+			return Index;
+	}
+
+	return -1;
+}
+
+bool PanelContent::ColumnBoundaryAt(vec2 Point) const
+{
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		if (Nodes[Index].Visible && PointVisible(Index, Point) && ListBoxBoundaryAt(Nodes[Index], Point) >= 0)
+			return true;
+	}
+
+	return false;
+}
+
+int PanelContent::ListBoxColumnAt(const UiNode& Item, int Row, float X) const
+{
+	if (Row < 0 || Row >= static_cast<int>(Item.Options.size()))
+		return 0;
+
+	// Rows are monospace in practice, but measuring the prefixes keeps the caret exact for any font.
+	const std::wstring& Text = Item.Options[static_cast<size_t>(Row)];
+	const float Font = 12.f * Scale;
+	const float LocalX = X - ListBoxTextX(Item);
+	std::wstring Prefix;
+	Prefix.reserve(Text.size());
+
+	int Best = 0;
+	float BestDistance = 1e9f;
+
+	for (int Index = 0; Index <= static_cast<int>(Text.size()); Index++)
+	{
+		Prefix.assign(Text, 0, static_cast<size_t>(Index));
+		const float Distance = std::fabs(ListBoxMeasure(Item, Prefix.c_str(), Font) - LocalX);
+
+		if (Distance < BestDistance)
+		{
+			BestDistance = Distance;
+			Best = Index;
+		}
+	}
+
+	return Best;
+}
+
+void PanelContent::ListBoxCharRange(const UiNode& Item, int Row, int& Low, int& High) const
+{
+	Low = 0;
+	High = 0;
+
+	if (Row < 0 || Row != Item.TextSelRow || Row >= static_cast<int>(Item.Options.size()))
+		return;
+
+	const int Length = static_cast<int>(Item.Options[static_cast<size_t>(Row)].size());
+	const int Anchor = std::clamp(Item.TextSelAnchor, 0, Length);
+	const int Caret = std::clamp(Item.TextSelCaret, 0, Length);
+	Low = std::min(Anchor, Caret);
+	High = std::max(Anchor, Caret);
+}
+
+bool PanelContent::ListBoxCopySelection(int Node) const
+{
+	if (!Valid(Node) || Nodes[Node].Kind != UiNodeKind::ListBox)
+		return false;
+
+	const UiNode& Item = Nodes[Node];
+	const int Row = Item.TextSelRow >= 0 ? Item.TextSelRow : Item.Selected;
+
+	if (Row < 0 || Row >= static_cast<int>(Item.Options.size()))
+		return false;
+
+	int Low = 0;
+	int High = 0;
+	ListBoxCharRange(Item, Row, Low, High);
+
+	const std::wstring& Text = Item.Options[static_cast<size_t>(Row)];
+
+	if (Low == High)
+	{
+		if (Text.empty())
+			return false;
+
+		CopyTextToClipboard(Text);
+		return true;
+	}
+
+	CopyTextToClipboard(Text.substr(static_cast<size_t>(Low), static_cast<size_t>(High - Low)));
+	return true;
+}
+
 int PanelContent::TableListRowAt(const UiNode& Item, vec2 Point) const
 {
 	if (Item.Kind != UiNodeKind::TableList || Item.RowHeight <= 0.f)
@@ -1377,6 +1525,10 @@ void PanelContent::AdoptViewState(const PanelContent& Previous)
 {
 	const size_t Count = std::min(Nodes.size(), Previous.Nodes.size());
 
+	// A column drag re-spaces the row, which rebuilds the panel mid gesture: the divider being dragged must
+	// stay the same one on the rebuilt list.
+	BoundaryIndex = Previous.BoundaryIndex;
+
 	for (size_t Index = 0; Index < Count; Index++)
 	{
 		UiNode& Item = Nodes[Index];
@@ -1396,6 +1548,40 @@ void PanelContent::AdoptViewState(const PanelContent& Previous)
 		{
 			Item.SelectedRow = Old.SelectedRow;
 			Item.SelectedColumn = Old.SelectedColumn;
+		}
+
+		// A rebuild triggered by the selection itself (clicking a row refreshes the panel) must not drop the
+		// characters the user dragged over, so the range follows the row when it still exists.
+		if (Item.Kind == UiNodeKind::ListBox && Old.TextSelRow >= 0 &&
+			Old.TextSelRow < static_cast<int>(Item.Options.size()))
+		{
+			Item.TextSelRow = Old.TextSelRow;
+			Item.TextSelAnchor = Old.TextSelAnchor;
+			Item.TextSelCaret = Old.TextSelCaret;
+		}
+
+		// Focus follows the same node through a rebuild, so a click that refreshes the panel does not leave the
+		// list thinking it is inactive (Ctrl+C on a fresh highlight depends on it).
+		if (Old.Focus)
+		{
+			Item.Focus = true;
+			Focused = static_cast<int>(Index);
+		}
+
+		// A row menu survives the rebuild it caused: opening it selects a row, and that selection is what
+		// refreshes the panel, so dropping the menu here would close it on its own first frame.
+		if (Old.MenuOpen && (Item.Kind == UiNodeKind::ListBox || Item.Kind == UiNodeKind::TableList))
+		{
+			if (Item.Kind == UiNodeKind::ListBox && Old.Selected >= 0 &&
+				Old.Selected < static_cast<int>(Item.Options.size()))
+				Item.Selected = Old.Selected;
+
+			Item.MenuOpen = true;
+			Item.MenuPoint = Old.MenuPoint;
+			Item.MenuHover = -1;
+
+			if (Item.OnMenuOpen)
+				Item.OnMenuOpen();
 		}
 	}
 }
@@ -1456,6 +1642,39 @@ bool PanelContent::OnRightMouseDown(vec2 Point)
 
 		ClearFocus();
 		Focused = Index;
+		OpenMenu(Index, Point);
+		return true;
+	}
+
+	// Lists: right-click selects the row under the pointer and opens the owner's menu for it.
+	for (int Index = 0; Index < static_cast<int>(Nodes.size()); Index++)
+	{
+		UiNode& Item = Nodes[Index];
+
+		if (Item.Kind != UiNodeKind::ListBox || !Item.Visible || !PointVisible(Index, Point))
+			continue;
+
+		const int Row = ListBoxRowAt(Item, Point);
+
+		if (Row < 0)
+			continue;
+
+		if (!Nodes[Index].OnMenuOpen)
+			continue;
+
+		ClearFocus();
+		Focused = Index;
+		Nodes[Index].Focus = true;
+		Nodes[Index].Selected = Row;
+
+		// Right-clicking a different row makes the old character selection meaningless; on the same row it
+		// stays, so the menu can copy exactly what the user dragged over.
+		if (Nodes[Index].TextSelRow >= 0 && Nodes[Index].TextSelRow != Row)
+			Nodes[Index].TextSelRow = -1;
+
+		if (Nodes[Index].OnSelect)
+			Nodes[Index].OnSelect(Row);
+
 		OpenMenu(Index, Point);
 		return true;
 	}
@@ -1771,8 +1990,22 @@ void PanelContent::LayoutNode(int Node, rect Bounds)
 		return;
 	case UiNodeKind::ListBox:
 	{
-		const float Total = static_cast<float>(Item.Options.size()) * ListRowHeight() + ListPad * Scale * 2.f;
+		const float Row = ListRowHeight();
+		const float Total = static_cast<float>(Item.Options.size()) * Row + ListPad * Scale * 2.f;
 		Item.ScrollMax = std::max(0.f, Total - Bounds.height());
+
+		// Ensure-visible with one row of context: a row already on screen leaves the user's scroll alone.
+		if (Item.RevealRow >= 0 && Item.RevealRow < static_cast<int>(Item.Options.size()))
+		{
+			const float Top = ListPad * Scale + static_cast<float>(Item.RevealRow) * Row;
+
+			if (Top - Row < Item.Scroll)
+				Item.Scroll = Top - Row;
+			else if (Top + Row * 2.f > Item.Scroll + Bounds.height())
+				Item.Scroll = Top + Row * 2.f - Bounds.height();
+		}
+
+		Item.RevealRow = -1;
 		Item.Scroll = std::clamp(Item.Scroll, 0.f, Item.ScrollMax);
 		return;
 	}
@@ -2688,6 +2921,10 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 			HexEndEdit(Item, true);
 	}
 
+	// A press drops any list's character selection; the branch that handles this press starts its own.
+	for (UiNode& Item : Nodes)
+		Item.TextSelRow = -1;
+
 	// Hex dump: left press starts a selection in the column under the pointer; dragging extends it across
 	// rows. A double-click on a value or character starts editing it. A press on the dump's scrollbar
 	// belongs to the scrollbar even where the bar overlays the text column.
@@ -2716,11 +2953,15 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 		ClearFocus();
 		Focused = Index;
 		Item.MenuOpen = false;
+		Item.HexHoverTip = false;
 		Item.HexSelColumn = Column;
 		Item.HexSelAnchor = Address;
 		Item.HexSelStart = Address;
 		Item.HexSelEnd = std::min(Address + Width, Item.HexSpan);
 		Item.HexHasSelection = true;
+
+		if (Item.HexSelectionChanged)
+			Item.HexSelectionChanged(Item.HexSelStart, Item.HexSelEnd);
 
 		if (DoubleClick && Column != 0 && Item.HexWrite)
 		{
@@ -2846,6 +3087,24 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 
 	UiNode& Item = Nodes[Hit];
 
+	// A list column boundary is a drag handle: it takes the press before row selection or text selection,
+	// so the same gesture that re-spaces the row never starts a highlight.
+	if (Item.Kind == UiNodeKind::ListBox)
+	{
+		const int Boundary = ListBoxBoundaryAt(Item, Point);
+
+		if (Boundary >= 0)
+		{
+			ClearFocus();
+			Focused = Hit;
+			Item.Focus = true;
+			BoundaryIndex = Boundary;
+			DragNode = Hit;
+			DragKind = 8;
+			return true;
+		}
+	}
+
 	if (IsPressable(Item.Kind))
 	{
 		ClearFocus();
@@ -2912,10 +3171,24 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 	case UiNodeKind::ListBox:
 	{
 		ClearFocus();
+		Focused = Hit;
+		Item.Focus = true;
 		const float Local = Point.y - (Item.Bounds.top + ListPad * Scale) + Item.Scroll;
 		const int Row = static_cast<int>(std::floor(Local / ListRowHeight()));
 
-		if (Local >= 0.f && Row < static_cast<int>(Item.Options.size()) && Row != Item.Selected)
+		// A separator row is scenery: clicking it does not change the selection or start a drag.
+		if (Local < 0.f || Row < 0 || Row >= static_cast<int>(Item.Options.size()) || ListRowDivider(Item, Row))
+			return true;
+
+		// The press drops a character anchor too, so dragging selects part of the row; a plain click leaves
+		// an empty range and copies the whole row.
+		Item.TextSelRow = Row;
+		Item.TextSelAnchor = ListBoxColumnAt(Item, Row, Point.x);
+		Item.TextSelCaret = Item.TextSelAnchor;
+		DragNode = Hit;
+		DragKind = 7;
+
+		if (Row != Item.Selected)
 		{
 			Item.Selected = Row;
 			Invoke(Item.OnSelect, Row);
@@ -2930,6 +3203,42 @@ bool PanelContent::OnMouseDown(vec2 Point, int& DragNode, int& DragKind)
 
 void PanelContent::OnMouseMove(vec2 Point, int DragNode, int DragKind)
 {
+	HoverPoint = Point;
+
+	// Hover-to-identify: one byte under the pointer for two seconds shows its address. Moving to another
+	// byte, leaving the dump, opening the menu or editing restarts the wait.
+	const uint64_t Now = GetTickCount64();
+
+	for (UiNode& Item : Nodes)
+	{
+		if (Item.Kind != UiNodeKind::HexView)
+			continue;
+
+		int Column = 1;
+		uint64_t Address = 0;
+		uint64_t Width = 1;
+		const bool Inside = !DragNode && !Item.MenuOpen && !Item.HexEditing && PointInRect(Item.Bounds, Point) &&
+			HexHit(Item, Point, Column, Address, Width);
+
+		if (!Inside)
+		{
+			Item.HexHoverTip = false;
+			Item.HexHoverAddress = ~0ull;
+			continue;
+		}
+
+		if (Item.HexHoverAddress != Address)
+		{
+			Item.HexHoverAddress = Address;
+			Item.HexHoverSince = Now;
+			Item.HexHoverTip = false;
+		}
+		else if (!Item.HexHoverTip && Now - Item.HexHoverSince >= 2000)
+		{
+			Item.HexHoverTip = true;
+		}
+	}
+
 	for (UiNode& Item : Nodes)
 	{
 		if (Item.MenuOpen)
@@ -2995,7 +3304,38 @@ void PanelContent::OnMouseMove(vec2 Point, int DragNode, int DragKind)
 			Item.HexSelStart = std::min(Item.HexSelAnchor, Address);
 			Item.HexSelEnd = std::min(std::max(Item.HexSelAnchor, Address) + Width, Item.HexSpan);
 			Item.HexHasSelection = true;
+
+			if (Item.HexSelectionChanged)
+				Item.HexSelectionChanged(Item.HexSelStart, Item.HexSelEnd);
 		}
+	}
+	else if (DragKind == 7 && Item.Kind == UiNodeKind::ListBox && Item.TextSelRow >= 0 &&
+		Item.TextSelRow < static_cast<int>(Item.Options.size()))
+	{
+		const int Row = ListBoxRowAt(Item, Point);
+
+		if (Row == Item.TextSelRow)
+		{
+			Item.TextSelCaret = ListBoxColumnAt(Item, Row, Point.x);
+		}
+		else
+		{
+			// Dragged off the row: the caret clamps to the near end of the anchored row, so the range still
+			// grows in the direction the pointer went.
+			const float RowTop = Item.Bounds.top + ListPad * Scale +
+				static_cast<float>(Item.TextSelRow) * ListRowHeight() - Item.Scroll;
+			const bool Above = Point.y < RowTop;
+			Item.TextSelCaret = Above ? 0 : static_cast<int>(Item.Options[static_cast<size_t>(Item.TextSelRow)].size());
+		}
+	}
+	else if (DragKind == 8 && Item.Kind == UiNodeKind::ListBox && BoundaryIndex >= 0 && Item.OnBoundaryDrag)
+	{
+		// The pointer's absolute character column, not a delta: the owner places the divider there, so a
+		// clamped divider re-attaches to the pointer instead of jumping on the reverse move.
+		const float CharWidth = ListBoxCharWidth(Item);
+
+		if (CharWidth > 0.f)
+			Item.OnBoundaryDrag(BoundaryIndex, static_cast<int>(std::lround((Point.x - ListBoxTextX(Item)) / CharWidth)));
 	}
 }
 
@@ -3221,6 +3561,46 @@ bool PanelContent::OnKey(int Key)
 	{
 		CloseMenus();
 		return true;
+	}
+
+	if (Valid(Focused) && Nodes[Focused].Kind == UiNodeKind::ListBox)
+	{
+		UiNode& List = Nodes[Focused];
+		const bool Control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+
+		if (Control && Key == 'C')
+		{
+			ListBoxCopySelection(Focused);
+			return true;
+		}
+
+		if (Control && Key == 'A')
+		{
+			// Select all of the current row: the whole operands line is what a copy then takes.
+			if (List.Selected >= 0 && List.Selected < static_cast<int>(List.Options.size()))
+			{
+				List.TextSelRow = List.Selected;
+				List.TextSelAnchor = 0;
+				List.TextSelCaret = static_cast<int>(List.Options[static_cast<size_t>(List.Selected)].size());
+				return true;
+			}
+		}
+	}
+
+	// A highlight outlives focus: a refresh rebuilds the panel, which clears the focused node. Ctrl+C then
+	// still copies whatever list shows a dragged range, so highlighting text is enough to copy it.
+	if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && Key == 'C' &&
+		(!Valid(Focused) || Nodes[Focused].Kind == UiNodeKind::ListBox))
+	{
+		for (int Node = 0; Node < static_cast<int>(Nodes.size()); Node++)
+		{
+			int Low = 0;
+			int High = 0;
+			ListBoxCharRange(Nodes[Node], Nodes[Node].TextSelRow, Low, High);
+
+			if (Low < High && ListBoxCopySelection(Node))
+				return true;
+		}
 	}
 
 	if (Valid(Focused) && Nodes[Focused].Kind == UiNodeKind::HexView)
@@ -3752,7 +4132,17 @@ void PanelContent::DrawShapesNode(int Node, const UiTheme& Theme, float ScaleVal
 			const float Top = Item.Bounds.top + Inset + static_cast<float>(Index) * Row - Item.Scroll;
 			const rect RowRect(Item.Bounds.left + Inset, Top, RowRight, Top + Row);
 
-			if (Index == Item.Selected)
+			if (ListRowDivider(Item, Index))
+			{
+				// A separator row is a hairline with the row's own height around it.
+				const float Hair = std::max(1.f, std::round(ScaleValue));
+				const float Y = std::round(Top + Row * 0.5f);
+				renderer::draw_filled_rect(rect(RowRect.left + 4.f * ScaleValue, Y, RowRect.right - 4.f * ScaleValue, Y + Hair),
+					Opaque(Theme.Border));
+				continue;
+			}
+
+			if (Index == Item.Selected || std::find(Item.RowAccent.begin(), Item.RowAccent.end(), Index) != Item.RowAccent.end())
 				renderer::draw_filled_rounded_rect(RowRect, 4.f * ScaleValue, Tint(Theme.AccentSoft));
 			else if (HoverAllowed && !Off && PointInRect(RowRect, Mouse) && PointInRect(View, Mouse))
 				renderer::draw_filled_rounded_rect(RowRect, 4.f * ScaleValue, Theme.TabHover);
@@ -4337,11 +4727,31 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 			const rect RowRect(Item.Bounds.left + 1.f, Top, TextRight, Top + Row);
 
 			// Rows are culled to the viewport explicitly: the glyph pass is not reliably scissored.
-			if (!TextVisible(RowRect, ChildVisible))
+			if (!TextVisible(RowRect, ChildVisible) || ListRowDivider(Item, Index))
 				continue;
 
-			DrawTextLine(vec2(Item.Bounds.left + Inset + 8.f * ScaleValue, Top + (Row - RowLine) * 0.5f), RowFont, UiAlign::Start,
-				Item.Options[Index].c_str(), Index == Item.Selected ? Tint(Theme.Accent) : TextTint);
+			const bool Accented = Index == Item.Selected ||
+				std::find(Item.RowAccent.begin(), Item.RowAccent.end(), Index) != Item.RowAccent.end();
+			const float TextX = Item.Bounds.left + Inset + 8.f * ScaleValue;
+
+			// A dragged character range paints behind its glyphs, so a copied operand is visible as chosen.
+			int SelLow = 0;
+			int SelHigh = 0;
+			ListBoxCharRange(Item, Index, SelLow, SelHigh);
+
+			if (SelHigh > SelLow)
+			{
+				const std::wstring& Text = Item.Options[Index];
+				const std::wstring Before = Text.substr(0, static_cast<size_t>(SelLow));
+				const std::wstring Through = Text.substr(0, static_cast<size_t>(SelHigh));
+				const float Left = TextX + renderer::measure_text(Before.c_str(), RowFont).width();
+				const float Right = TextX + renderer::measure_text(Through.c_str(), RowFont).width();
+				renderer::draw_filled_rect(rect(Left, Top + 3.f * ScaleValue, std::max(Left + 2.f * ScaleValue, Right),
+					Top + Row - 3.f * ScaleValue), Tint(Theme.AccentSoft));
+			}
+
+			DrawTextLine(vec2(TextX, Top + (Row - RowLine) * 0.5f), RowFont, UiAlign::Start,
+				Item.Options[Index].c_str(), Accented ? Tint(Theme.Accent) : TextTint);
 		}
 
 		renderer::pop_clip();
@@ -4425,6 +4835,28 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 		const color AddressTint = Tint(Theme.Muted);
 		const color ChangedTint = Tint(Theme.Danger);
 		const int Stride = Item.HexUtf16 ? 2 : 1;
+
+		// Hover tip: a small card naming the byte under the pointer. Its occluder is registered before the
+		// rows so the dump text behind it is cut, and the card paints after them.
+		rect Tip;
+		std::wstring TipText;
+		const float TipFont = 11.5f * ScaleValue;
+		const bool ShowTip = Item.HexHoverTip && !Item.MenuOpen;
+
+		if (ShowTip)
+		{
+			TipText = HexAddressLabel(Item, Item.HexHoverAddress);
+			const float TipWidth = std::min(ContentArea.width(),
+				renderer::measure_text(TipText.c_str(), TipFont).width() + 16.f * ScaleValue);
+			const float TipHeight = 22.f * ScaleValue;
+			const rect View = HasArea(ContentArea) ? ContentArea : Item.Bounds;
+			const float Left = std::clamp(HoverPoint.x + 14.f * ScaleValue, View.left,
+				std::max(View.left, View.right - TipWidth));
+			const float Top = std::clamp(HoverPoint.y + 16.f * ScaleValue, View.top,
+				std::max(View.top, View.bottom - TipHeight));
+			Tip = rect(Left, Top, Left + TipWidth, Top + TipHeight);
+			Occluders.push_back(Tip);
+		}
 
 		for (uint64_t Index = First; Index < Last; Index++)
 		{
@@ -4582,6 +5014,14 @@ void PanelContent::DrawTextNode(int Node, const UiTheme& Theme, float ScaleValue
 						Top + RowPx - 2.f * ScaleValue), Tint(Theme.Accent));
 				}
 			}
+		}
+
+		if (ShowTip)
+		{
+			renderer::draw_filled_rounded_rect(Tip, 5.f * ScaleValue, Opaque(UiMix(Theme.Menu, Theme.Window, 0.25f)));
+			renderer::draw_rounded_rect(Tip, 5.f * ScaleValue, 1.f * ScaleValue, Opaque(Theme.MenuBorder));
+			DrawTextLine(vec2(Tip.left + 8.f * ScaleValue, Tip.top + (Tip.height() - renderer::line_height(TipFont)) * 0.5f),
+				TipFont, UiAlign::Start, TipText.c_str(), Theme.Text);
 		}
 
 		break;

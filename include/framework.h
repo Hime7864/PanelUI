@@ -167,6 +167,10 @@ struct UiNode
 	UiIcon IconGlyph = UiIcon::None;
 	UiImageFit Fit = UiImageFit::Contain;
 	std::vector<std::wstring> Options;
+	// Rows that draw a hairline instead of text (list separators). They are not selectable.
+	std::vector<int> RowDividers;
+	// Extra rows drawn with the selection tint (a selected block spanning several list rows).
+	std::vector<int> RowAccent;
 	std::vector<std::wstring> Columns;
 	std::vector<std::vector<std::wstring>> Rows;
 	std::vector<float> ColumnWidths;
@@ -221,12 +225,18 @@ struct UiNode
 	// Byte under the pointer when the menu opened.
 	uint64_t HexMenuAddress = 0;
 	bool HexMenuOnByte = false;
+	// Hover-to-identify: after two seconds over one byte, the dump shows that byte's address.
+	uint64_t HexHoverAddress = 0;
+	uint64_t HexHoverSince = 0;
+	bool HexHoverTip = false;
 	// Selection is a byte range shown in exactly one column: 0 address, 1 values, 2 text.
 	int HexSelColumn = 1;
 	uint64_t HexSelAnchor = 0;
 	uint64_t HexSelStart = 0;
 	uint64_t HexSelEnd = 0;
 	bool HexHasSelection = false;
+	// Notified whenever the dump selection changes (press or drag), so another view can follow it.
+	std::function<void(uint64_t, uint64_t)> HexSelectionChanged;
 	// Inline edit: column 1 types a cell value, column 2 overwrites characters; HexEditAddress is the
 	// first byte of the cell or character being typed.
 	bool HexEditing = false;
@@ -234,6 +244,20 @@ struct UiNode
 	uint64_t HexEditAddress = 0;
 	std::wstring HexEditText;
 	float Scroll = 0.f;
+	// ListBox: row to bring into view on the next layout (only scrolls when it is off screen), -1 for none.
+	// Survives the scroll restore of a rebuild, so a refresh can both keep the user's view and reveal.
+	int RevealRow = -1;
+	// ListBox text selection: a character range inside one row (TextSelRow), from anchor to caret. -1 when
+	// nothing is selected. Row selection and text selection coexist: the row drives the owner's bindings,
+	// the range is what a copy takes.
+	int TextSelRow = -1;
+	int TextSelAnchor = 0;
+	int TextSelCaret = 0;
+	// ListBox column boundaries, in characters from the row text start. A press within a few pixels starts a
+	// boundary drag instead of a text selection; every move reports (boundary index, pointer column in
+	// characters from the row text start) so the owner can place that divider under the pointer.
+	std::vector<float> ListBoundaries;
+	std::function<void(int, int)> OnBoundaryDrag;
 	float ScrollMax = 0.f;
 	float ScrollX = 0.f;
 	float ScrollMaxX = 0.f;
@@ -332,6 +356,11 @@ public:
 	// Copies the dump selection as shown in its column, or as the requested part: spaced values, decoded
 	// text, address lines, or address + values + text once per row.
 	void HexCopySelection(int Node, HexCopy Mode = HexCopy::Column) const;
+	// Copies a ListBox's selected characters, or the whole row when there is no text selection. Returns
+	// false when the node has nothing to give.
+	bool ListBoxCopySelection(int Node) const;
+	// True when the point is on a draggable ListBox column boundary, so the shell can show a resize cursor.
+	bool ColumnBoundaryAt(vec2 Point) const;
 	// Starts editing a TableList cell when CanEdit allows it; the cell becomes an inline text field.
 	bool BeginCellEdit(int Node, int Row, int Column);
 	void CloseMenus();
@@ -358,6 +387,8 @@ private:
 	int Pressed = -1;
 	int Focused = -1;
 	float ScrollGrab = 0.f;
+	// List column drag in progress: which boundary of the dragged list.
+	int BoundaryIndex = -1;
 	vec2 DragLast;
 	int ResizeTableNode = -1;
 	int ResizeTableColumn = -1;
@@ -371,6 +402,8 @@ private:
 	std::vector<int> DeferredAbsolute;
 	mutable std::vector<rect> Occluders;
 	float TextAlpha = 1.f;
+	// Pointer position of the last move, used to place hover tips.
+	vec2 HoverPoint;
 
 	bool Valid(int Node) const { return Node >= 0 && Node < static_cast<int>(Nodes.size()); }
 	void LayoutNode(int Node, rect Bounds);
@@ -401,6 +434,19 @@ private:
 	int ScrollbarAt(vec2 Point) const;
 	int FindScrollNode(vec2 Point) const;
 	int TableListRowAt(const UiNode& Item, vec2 Point) const;
+	int ListBoxRowAt(const UiNode& Item, vec2 Point) const;
+	// Nearest character boundary in a ListBox row to an X position, in the row's own text coordinates.
+	int ListBoxColumnAt(const UiNode& Item, int Row, float X) const;
+	// Index of the column boundary under the point, or -1.
+	int ListBoxBoundaryAt(const UiNode& Item, vec2 Point) const;
+	// Advance of one character in the list's own font, so drags convert pixels to characters exactly.
+	float ListBoxCharWidth(const UiNode& Item) const;
+	// Measures text in the node's own font, restoring the previous one.
+	float ListBoxMeasure(const UiNode& Item, const wchar_t* Text, float Size) const;
+	// Selected characters of a ListBox row: [Low, High), empty when nothing is selected.
+	void ListBoxCharRange(const UiNode& Item, int Row, int& Low, int& High) const;
+	// Where a row's text starts and its character metrics, so painting and hit testing agree.
+	float ListBoxTextX(const UiNode& Item) const;
 	int TableListColumnAt(const UiNode& Item, vec2 Point) const;
 	// Column widths in DIPs, with any width beyond the configured columns given to the last one so a
 	// full-width table spans its node exactly.
